@@ -1,0 +1,5 @@
+0x74005070 NandFlash 读取结果数据 DMA搬运地址，低16位
+0x74005074 NandFlash 读取结果数据 DMA搬运地址，高16位
+0x74005114 NandFlash Ctrl寄存器
+0x74005110 NandFlash 命令寄存器 ?
+0x7400510C NandFlash RowAddress寄存器

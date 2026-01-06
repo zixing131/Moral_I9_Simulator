@@ -1,0 +1,10 @@
+bin/*.exe
+bin/Rom/moral-i9.bin
+*.o
+*.id0
+*.id1
+*.id2
+*.nam
+build
+.vscode
+.idea

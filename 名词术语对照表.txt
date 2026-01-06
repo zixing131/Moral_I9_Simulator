@@ -1,0 +1,9 @@
+FTL         Flash Translation Layer (闪存转换层)
+LUT         Logical-to-Physical Block Lookup Table(逻辑块到物理块映射)
+LBA         Logical Block Addressing（逻辑块地址）（文件系统级别）
+LMA         Logical Media Address（逻辑媒体地址）（FTL 内部级别）
+PBA         Physical Block Address（NAND 物理层）
+CIS         Chip Information System(芯片信息系统块)
+
+
+LBA → LMA → PBA → NAND 物理地址
