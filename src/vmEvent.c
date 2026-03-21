@@ -199,10 +199,19 @@ inline void handleVmEvent_EMU(uint64_t address)
                 if (vmEvent->r0 != 3)
                 {
                     IRQ_MASK_SET_L_Data |= (1u << 31);
-                    tmp = 3;
-                    uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
-                    tmp = 1;
-                    uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+                    if (vmEvent->r0 == MR_MOUSE_UP)
+                    {
+                        tmp = 0;
+                        uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
+                        uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+                    }
+                    else
+                    {
+                        tmp = 3;
+                        uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
+                        tmp = 1;
+                        uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+                    }
 
                     if (StartInterrupt(31, address))
                     {

@@ -85,8 +85,9 @@ static u32 auxadc_get_result(void)
     case 0xB81: /* Y 坐标通道 */
         result = (touchY < 400u ? touchY : 399u) * 1023u / 400u;
         break;
-    case 0x781: /* Z1 压力通道 */
-        result = isTouchDown ? 200u : 1023u;
+    case 0x781: /* Z1 压力通道 — 未触摸时返回 0（电路开路无电流），
+                  固件 MdlTouchScreenHandle 的 LABEL_13 据此生成 pen-up */
+        result = isTouchDown ? 200u : 0u;
         break;
     case 0x7B1: /* Z2 压力通道 */
         result = isTouchDown ? 600u : 1023u;

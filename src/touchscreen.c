@@ -37,7 +37,7 @@ static void moral_touch_mmi_ram_patch(void)
         /* +2 byte_D0919A，+4 gReEnableTouchScreenFlag（相对邮箱半字） */
         if (uc_mem_write(MTK, base + 2u, &one, 1) != UC_ERR_OK)
             continue;
-        uc_mem_write(MTK, base + 4u, &one, 1);
+        uc_mem_write(MTK, base + 4u, &zero32, 1);
         if (uc_mem_read(MTK, base, &mbox, 2) == UC_ERR_OK && mbox == 255u)
         {
             u16 z = 0;

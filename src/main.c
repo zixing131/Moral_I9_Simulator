@@ -1219,6 +1219,28 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
     }
 
+    /*
+     * 绕过固件触摸屏校准转换，直接返回 SDL 屏幕坐标。
+     * 固件校准公式依赖 NVRAM 中的校准数据（X/Y offset+scale），在模拟器中
+     * 这些值可能为零或与模拟器的 ADC 映射不匹配，导致坐标全部错误。
+     * _MdlTouchscreenGetXCoordination @0x219878: R0=rawADC → 直接返回 touchX
+     * _MdlTouchscreenGetYCoordination @0x219848: R0=rawADC → 直接返回 touchY
+     */
+    if (((u32)address & ~1u) == 0x219878u)
+    {
+        tmp1 = touchX;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp2);
+        uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
+    }
+    if (((u32)address & ~1u) == 0x219848u)
+    {
+        tmp1 = touchY;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp2);
+        uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
+    }
+
     switch (address)
     {
     /*
