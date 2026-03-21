@@ -421,6 +421,9 @@ void loop()
                 break;
             }
         }
+        if (Lcd_Need_Update)
+            renderGdiBufferToWindow();
+
         SDL_Delay(1);
     }
 
@@ -754,21 +757,31 @@ void initMtkSimalator()
         static uc_hook code_hooks[32];
         int hi = 0;
         static const u32 hook_ranges[][2] = {
-            {0xA144,    0xCD44},     /* cluster: pin config, LCD params */
+            {0xA144,    0xA145},     /* pin config */
+            {0xCD44,    0xCD45},     /* LCD params */
             {0x1E574,   0x1E575},    /* HalDispTransAddr */
-            {0x2AE1C,   0x2CB28},    /* ker_assert, DMA2D funcs */
+            {0x2AE1C,   0x2AE1D},    /* ker_assert */
+            {0x2C55E,   0x2C55F},    /* DrvDMA2DIsHWBitBlt */
+            {0x2C5DC,   0x2C5DD},    /* DrvDMA2DIsHWFillRect */
+            {0x2CB28,   0x2CB29},    /* DrvDMA2DCmdFinish */
             {0x2D5ECA,  0x2D5ECB},   /* uart_print */
             {0x31B9C,   0x31B9D},    /* RTC seconds hook */
             {0x1A605C,  0x1A605D},   /* ker_assert_func */
             {0x1D4B96,  0x1D4B97},   /* nand_translate_DMA */
             {0x1ED480,  0x1ED481},   /* _RtkExceptionRoutine */
             {0x1FE99C,  0x1FE99D},   /* LOG_SD */
-            {0x219712,  0x219DF0},   /* touch MsSend return points */
+            {0x219712,  0x219713},   /* MdlTouchScreenStatusReport MsSend return */
+            {0x219848,  0x219849},   /* _MdlTouchscreenGetYCoordination */
+            {0x219878,  0x219879},   /* _MdlTouchscreenGetXCoordination */
+            {0x219DF0,  0x219DF1},   /* _MdlTouchscreenRepeatADCProcess MsSend return */
             {0x30F34A,  0x30F34B},   /* dev_accGetLCDStatus */
             {0x32DFA4,  0x32DFA5},   /* _RtkAssertRoutine */
             {0x34D236,  0x34D237},   /* MsSend POP */
             {0x36ED44,  0x36ED45},   /* fatal error check */
-            {0x3B5A00,  0x3B5C54},   /* KER trace/error cluster */
+            {0x3B5A00,  0x3B5A01},   /* KER_VTRACE */
+            {0x3B5A52,  0x3B5A53},   /* ker_trace */
+            {0x3B5BA4,  0x3B5BA5},   /* fatal error check */
+            {0x3B5C54,  0x3B5C55},   /* KER error */
             {0x7C322C,  0x7C3238},   /* skip mrc instructions */
             {0x800160C, 0x800160D},  /* KER error high addr */
             {0x1C007160,0x1C007161}, /* KER error high addr */

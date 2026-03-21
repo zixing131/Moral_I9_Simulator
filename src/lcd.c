@@ -83,11 +83,6 @@ void lcdTaskMain()
     }
 #endif
 
-    if (Lcd_Need_Update)
-    {
-        renderGdiBufferToWindow();
-    }
-
     if (currentTime > render_time)
     {
         render_time = currentTime + 5;

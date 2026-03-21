@@ -261,7 +261,8 @@ inline void handleVmEvent_EMU(uint64_t address)
                 uc_mem_write(MTK, 0x34002C28, &tmp, 4);
                 uc_mem_read(MTK, 0x34002C04, &halTimerCount, 4);
                 uc_mem_write(MTK, 0x34002C08, &halTimerCount, 4);
-                StartInterrupt(vmEvent->r0, address);
+                if (!StartInterrupt(vmEvent->r0, address))
+                    EnqueueVMEvent(VM_EVENT_Timer_IRQ, vmEvent->r0, 0);
                 break;
             case VM_EVENT_KEYBOARD:
                 handleKeyPadVmEvent(vmEvent, address);
