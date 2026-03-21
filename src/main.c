@@ -354,6 +354,10 @@ void keyEvent(int type, int key)
 
 void mouseEvent(int type, int x, int y)
 {
+    static u32 mouse_evt_cnt = 0;
+    mouse_evt_cnt++;
+    if (type != MR_MOUSE_MOVE)
+        printf("[MOUSE] #%u type=%d x=%d y=%d\n", mouse_evt_cnt, type, x, y);
     if (x < 0)
         x = 0;
     else if (x > 239)

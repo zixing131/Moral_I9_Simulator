@@ -8,6 +8,9 @@ static u32 touch_adc_x = 0;
 static u32 touch_adc_y = 0;
 static u8  touch_irq_pending = 0;
 
+static vm_event pending_touch_evt;
+static u8 pending_touch_active = 0;
+
 void moral_vm_touch_adc_request(u32 x, u32 y)
 {
     touch_adc_pending = 1;
@@ -42,12 +45,12 @@ int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
         if (vmIsLock == 0)
         {
             vmIsLock = 1;
-            // 将等待队列的事件加入到处理队列中
             for (i = 0; i < VmEventWaitCount; i++)
             {
-                // todo 剩余的还要回到等待队列
                 if (VmEventCount >= MAX_VM_EVENT_COUNT)
                     break;
+                if (VmEventHandleWaitList[i].event == VM_EVENT_TOUCH_SCREEN_IRQ)
+                    touch_irq_pending = 1;
                 VmEventHandleList[VmEventCount++] = VmEventHandleWaitList[i];
             }
             VmEventWaitCount = 0;
@@ -122,22 +125,43 @@ inline void handleVmEvent_EMU(uint64_t address)
 {
     u32 tmp;
 
-    /* 触摸 DOWN/UP 事件优先处理，先触发 pen-detect IRQ 31（匹配真实硬件顺序） */
-    if (touch_irq_pending && VmEventCount > 0 && vmIsLock == 0)
+    /* 触摸 DOWN/UP 事件优先处理，先触发 pen-detect IRQ 31 */
+    if (pending_touch_active || (touch_irq_pending && VmEventCount > 0 && vmIsLock == 0))
     {
-        touch_irq_pending = 0;
-        u32 i;
-        for (i = 0; i < VmEventCount; i++)
-        {
-            if (VmEventHandleList[i].event == VM_EVENT_TOUCH_SCREEN_IRQ)
-            {
-                vm_event tevt = VmEventHandleList[i];
-                u32 j;
-                VmEventCount--;
-                for (j = i; j < VmEventCount; j++)
-                    VmEventHandleList[j] = VmEventHandleList[j + 1];
+        vm_event tevt;
+        u8 have_evt = 0;
 
-                if (tevt.r0 != 3)
+        if (pending_touch_active)
+        {
+            tevt = pending_touch_evt;
+            have_evt = 1;
+        }
+        else
+        {
+            touch_irq_pending = 0;
+            u32 i;
+            for (i = 0; i < VmEventCount; i++)
+            {
+                if (VmEventHandleList[i].event == VM_EVENT_TOUCH_SCREEN_IRQ)
+                {
+                    tevt = VmEventHandleList[i];
+                    u32 j;
+                    VmEventCount--;
+                    for (j = i; j < VmEventCount; j++)
+                        VmEventHandleList[j] = VmEventHandleList[j + 1];
+                    have_evt = 1;
+                    break;
+                }
+            }
+        }
+
+        if (have_evt)
+        {
+            if (tevt.r0 != MR_MOUSE_MOVE)
+            {
+                u32 cpsr_chk;
+                uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_chk);
+                if (!isIRQ_Disable(cpsr_chk))
                 {
                     IRQ_MASK_SET_L_Data |= (1u << 31);
                     if (tevt.r0 == MR_MOUSE_UP)
@@ -162,17 +186,26 @@ inline void handleVmEvent_EMU(uint64_t address)
                         touch_adc_pending = 1;
                         touch_adc_x = rawX;
                         touch_adc_y = rawY;
+                        pending_touch_active = 0;
                     }
                     else
-                        EnqueueVMEvent(tevt.event, tevt.r0, tevt.r1);
+                    {
+                        pending_touch_evt = tevt;
+                        pending_touch_active = 1;
+                    }
                 }
                 else
                 {
-                    touch_adc_pending = 1;
-                    touch_adc_x = (tevt.r1 >> 16) & 0xffff;
-                    touch_adc_y = tevt.r1 & 0xffff;
+                    pending_touch_evt = tevt;
+                    pending_touch_active = 1;
                 }
-                break;
+            }
+            else
+            {
+                touch_adc_pending = 1;
+                touch_adc_x = (tevt.r1 >> 16) & 0xffff;
+                touch_adc_y = tevt.r1 & 0xffff;
+                pending_touch_active = 0;
             }
         }
     }
