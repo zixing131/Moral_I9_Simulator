@@ -1150,8 +1150,41 @@ void hookBlockCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *use
 void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
     u32 tmp1, tmp2, tmp3, tmp4;
+    u32 addr32 = (u32)address & ~1u;
 
-    if (((u32)address & ~1u) == 0x31b9c)
+    /*
+     * Fast path: skip addresses that don't match any hook.
+     * Hook addresses sorted numerically:
+     *   0xA144, 0xC166, 0xCD44,  | cluster 1
+     *   0x1E574,                  | isolated
+     *   0x2AE1C, 0x2C55E..2CB28, | cluster 3
+     *   0x31B9C,                  | isolated
+     *   0x1A605C..0x219DF0,       | cluster 5 (6 hooks)
+     *   0x2D5ECA..0x3B5C54,       | cluster 6 (9 hooks)
+     *   0x7C322C, 0x7C3238,       | cluster 7
+     *   0x800160C, 0x1C007160     | high addresses
+     */
+    if (addr32 > 0x31B9Cu  && addr32 < 0x1A605Cu)  goto fast_end;
+    if (addr32 < 0xA144u)                           goto fast_end;
+    if (addr32 > 0xCD44u   && addr32 < 0x1E574u)   goto fast_end;
+    if (addr32 > 0x1E574u  && addr32 < 0x2AE1Cu)   goto fast_end;
+    if (addr32 > 0x2CB28u  && addr32 < 0x31B9Cu)   goto fast_end;
+    if (addr32 > 0x3B5C54u && addr32 < 0x7C322Cu)  goto fast_end;
+    if (addr32 > 0x219DF0u && addr32 < 0x2D5ECAu)  goto fast_end;
+    if (addr32 > 0x1A605Cu && addr32 < 0x1D4B96u)  goto fast_end;
+    if (addr32 > 0x1D4B96u && addr32 < 0x1ED480u)  goto fast_end;
+    if (addr32 > 0x1ED480u && addr32 < 0x1FE99Cu)  goto fast_end;
+    if (addr32 > 0x1FE99Cu && addr32 < 0x219712u)  goto fast_end;
+    if (addr32 > 0x2D5ECAu && addr32 < 0x30F34Au)  goto fast_end;
+    if (addr32 > 0x30F34Au && addr32 < 0x32DFA4u)  goto fast_end;
+    if (addr32 > 0x32DFA4u && addr32 < 0x34D236u)  goto fast_end;
+    if (addr32 > 0x34D236u && addr32 < 0x36ED44u)  goto fast_end;
+    if (addr32 > 0x36ED44u && addr32 < 0x3B5A01u)  goto fast_end;
+    if (addr32 > 0x7C3238u && addr32 < 0x800160Cu) goto fast_end;
+    if (addr32 > 0x800160Cu && addr32 < 0x1C007160u) goto fast_end;
+    if (addr32 > 0x1C007160u)                       goto fast_end;
+
+    if (addr32 == 0x31b9c)
     {
         static u32 cached_rtc = 0;
         static clock_t last_rtc_time = 0;
@@ -1626,6 +1659,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         uc_reg_write(MTK, UC_ARM_REG_PC, &address);
         break;
     }
+fast_end:
     lastAddress = address;
 }
 
