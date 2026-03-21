@@ -177,6 +177,8 @@ static int de_read_fb(u32 srcAddr, u32 guestPitch, u16 w, u16 h)
     return 0;
 }
 
+static u32 de_periodic_call_cnt = 0;
+
 void de_emulator_periodic_refresh(void)
 {
     if (!De_PeriodicRefreshAllowed)
@@ -195,6 +197,9 @@ void de_emulator_periodic_refresh(void)
 
     de_blit_to_sdl(0, 0, DE_PANEL_W, DE_PANEL_H, DE_PANEL_W * DE_BPP);
     Lcd_Need_Update = 1;
+    de_periodic_call_cnt++;
+    if (de_periodic_call_cnt <= 5 || (de_periodic_call_cnt % 200) == 0)
+        printf("[LCD-REFRESH] periodic #%u buf=0x%x\n", de_periodic_call_cnt, srcBuf);
 }
 
 void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
@@ -426,12 +431,12 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             if (pitch == 0u)
                 pitch = (u32)w * DE_BPP;
 
-            static u8 de_pitch_logged = 0;
-            if (!de_pitch_logged)
+            static u32 de_trigger_cnt = 0;
+            de_trigger_cnt++;
+            if (de_trigger_cnt <= 5 || (de_trigger_cnt % 100) == 0)
             {
-                printf("[DE-trigger] buf=0x%x pitch=%u w=%u h=%u DE_Pitch=%u\n",
-                    srcBuf, pitch, w, h, DE_Layer0_Pitch);
-                de_pitch_logged = 1;
+                printf("[DE-trigger] #%u buf=0x%x pitch=%u w=%u h=%u\n",
+                    de_trigger_cnt, srcBuf, pitch, w, h);
             }
 
             if (de_read_fb(srcBuf, pitch, w, h) == 0)

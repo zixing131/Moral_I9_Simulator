@@ -89,10 +89,17 @@ void lcdTaskMain()
     }
 }
 
+static u32 composite_call_cnt = 0;
+
 void compositeLayers()
 {
     SDL_Surface *sfc = SDL_GetWindowSurface(window);
     if (!sfc) return;
+    composite_call_cnt++;
+    if (composite_call_cnt <= 5 || (composite_call_cnt % 100) == 0)
+        printf("[LCD-COMPOSITE] #%u layers: %d,%d,%d,%d\n", composite_call_cnt,
+               lcdLayerList[0].enable, lcdLayerList[1].enable,
+               lcdLayerList[2].enable, lcdLayerList[3].enable);
 
     u32 roiW = lcdRegionOfInterest_st.roi_width;
     u32 roiH = lcdRegionOfInterest_st.roi_height;

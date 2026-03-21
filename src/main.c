@@ -1204,26 +1204,27 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         u32 sx = (tmp2 >> 16) & 0xFFFF;
         u32 sy = tmp2 & 0xFFFF;
         static u8 report_log = 0;
-        if (report_log < 20)
+        if (report_log < 30)
         {
             report_log++;
-            printf("[TS-DBG] StatusReport: mode=%u screenX=%u screenY=%u\n",
-                   tmp1 & 0xFF, sx, sy);
+            printf("[TS-DBG] StatusReport: calib=%u type=%u screenX=%u screenY=%u R0=0x%x\n",
+                   tmp1 & 0xFF, (tmp1 >> 8) & 0xFF, sx, sy, tmp1);
         }
     }
     if (((u32)address & ~1u) == 0x2198a8u)
     {
-        u32 z1v = 0, z2v = 0, gx = 0, gy = 0;
+        u32 z1v = 0, z2v = 0, gx = 0, gy = 0, tsstate = 0;
         uc_mem_read(MTK, 0xD091B8u, &z1v, 4);
         uc_mem_read(MTK, 0xD091BCu, &z2v, 4);
         uc_mem_read(MTK, 0xD0917Cu, &gx, 4);
         uc_mem_read(MTK, 0xD09180u, &gy, 4);
+        uc_mem_read(MTK, 0xD09170u, &tsstate, 4);
         static u8 ts_handle_log_cnt = 0;
-        if (ts_handle_log_cnt < 20)
+        if (ts_handle_log_cnt < 30)
         {
             ts_handle_log_cnt++;
-            printf("[TS-DBG] MdlTouchScreenHandle: Z1=%u Z2=%u gX=%u gY=%u down=%d\n",
-                   z1v & 0xFFFF, z2v & 0xFFFF, gx & 0xFFFF, gy & 0xFFFF, isTouchDown);
+            printf("[TS-DBG] MdlTouchScreenHandle: Z1=%u Z2=%u gX=%u gY=%u down=%d gbTSState=%u\n",
+                   z1v & 0xFFFF, z2v & 0xFFFF, gx & 0xFFFF, gy & 0xFFFF, isTouchDown, tsstate & 0xFF);
         }
     }
     if (((u32)address & ~1u) == 0x21970eu)
@@ -1295,7 +1296,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R4, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R5, &tmp3);
-        if (tmp1 != 10u && tmp3 >= 0x1000u && tmp3 < 0xF0000000u)
+        if (tmp3 >= 0x1000u && tmp3 < 0xF0000000u)
         {
             u8 hdr[8];
             if (uc_mem_read(MTK, tmp3, hdr, sizeof hdr) == UC_ERR_OK)
@@ -1304,8 +1305,18 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
                 u16 w6 = (u16)hdr[6] | ((u16)hdr[7] << 8);
                 if (hdr[0] == 50u && w2 == 52u && w6 == 17233u)
                 {
-                    tmp1 = 10;
-                    uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+                    static u8 mssend_pop_log = 0;
+                    if (mssend_pop_log < 20)
+                    {
+                        mssend_pop_log++;
+                        printf("[TS-DBG] MsSend-POP: real_R0=%u mbox=%u (touch msg)\n", tmp1, tmp2);
+                    }
+                    if (tmp1 != 10u)
+                    {
+                        printf("[TS-DBG] MsSend-POP: FORCING R0 from %u to 10!\n", tmp1);
+                        tmp1 = 10;
+                        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+                    }
                 }
             }
         }
