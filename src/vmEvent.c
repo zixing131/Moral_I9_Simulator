@@ -130,30 +130,7 @@ inline void handleVmEvent_EMU(uint64_t address)
                 StartInterrupt(vmEvent->r0, address);
                 break;
             case VM_EVENT_KEYBOARD:
-                // 写入按键状态
-                // 假如6行 4列
-                if (vmEvent->r1 == 1)
-                {
-                    // tmp = ((1 << keyRowIdx)) | (((1 << keyColIdx)) << 8);
-                    tmp = ++keyRowIdx;
-                    // if (keyRowIdx == 8)
-                    // {
-                    //     keyRowIdx = 0;
-                    //     keyColIdx++;
-                    //     if (keyColIdx == 8)
-                    //         keyColIdx = 0;
-                    // }
-                    printf("Test Key Col:%d ,Row:%d ,tmp: %d\n", keyColIdx, keyRowIdx, tmp);
-                }
-                else
-                    tmp = 0;
-                uc_mem_write(MTK, 0x34000814, &tmp, 4);
-                if (StartInterrupt(12, address))
-                {
-                    printf("key event ok \n");
-                }
-                else
-                    EnqueueVMEvent(vmEvent->event, vmEvent->r0, vmEvent->r1);
+                handleKeyPadVmEvent(vmEvent, address);
                 break;
             case VM_EVENT_LCD_IRQ:
                 // 位于高32位中断
@@ -196,21 +173,29 @@ inline void handleVmEvent_EMU(uint64_t address)
                 { // adc采样中断
                     if (StartInterrupt(29, address))
                     {
-                        printf("handle touch adc ");
-                        tmp = vmEvent->r1 & 0xffff; // y
+                        u32 rawY = vmEvent->r1 & 0xffff;
+                        u32 rawX = (vmEvent->r1 >> 16) & 0xffff;
+                        tmp = rawY * 1023 / 400;
                         uc_mem_write(MTK, 0x3400C1C8, &tmp, 4);
-                        printf("%d", tmp);
-                        tmp = (vmEvent->r1 >> 16) & 0xffff; // x
+                        tmp = rawX * 1023 / 240;
                         uc_mem_write(MTK, 0x3400C1C0, &tmp, 4);
-                        printf(",%d", tmp);
                         tmp = 2;
                         uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
-                        printf("\n");
                     }
                     else
                         EnqueueVMEvent(vmEvent->event, vmEvent->r0, vmEvent->r1);
                 }
 
+                break;
+            case VM_EVENT_RTC_IRQ:
+                /* 时间已在 RtcTaskMain() 里 Update_RTC_Time()；此处只投递中断。
+                 * 若掩码未就绪则不再反复入队，避免占满事件队列。 */
+                StartInterrupt(DEV_IRQ_CHANNEL_RTC, address);
+                break;
+            case VM_EVENT_GPT_IRQ:
+                tmp = vmEvent->r0;
+                uc_mem_write(MTK, 0x81060010, &tmp, 4);
+                StartInterrupt(DEV_IRQ_CHANNEL_GPT, address);
                 break;
             case VM_EVENT_EXIT:
                 uc_emu_stop(MTK);

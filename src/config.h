@@ -12,6 +12,32 @@
 
 #define ROM_ADDRESS 0
 
+/*
+ * HalRtcGetSecondCount 钩子注入的「秒计数」与 mktime(2000-01-01 00:00:00 本地) 的差值修正。
+ * 若状态栏比宿主机慢整 16 小时（例：主机 17:18 显示 01:18），填 57600 (16*3600)。
+ * 若已对齐则改为 0。
+ */
+#ifndef MORAL_RTC_SECOND_OFFSET
+#define MORAL_RTC_SECOND_OFFSET 0
+#endif
+
+/*
+ * 在 OFFSET 之后再叠加的秒数（可为负）。
+ * 例：宿主机 2026-3-21 17:36 却显示 2034-3-22 01:36 → 约多 8 年 + 8 小时：
+ *     -252460800(8×365.25天级近似) - 28800 = -252489600。仍差 1 小时可再 ±3600 微调。
+ */
+#ifndef MORAL_RTC_EXTRA_SECONDS
+#define MORAL_RTC_EXTRA_SECONDS (-252489600LL)
+#endif
+
+/*
+ * 周期性从模拟器显存同步到 SDL（毫秒）。固件若不再频繁写 DE 触发寄存器 0x7400313C，
+ * 仅靠钩子无法刷新界面（时钟冻结、黑屏等）。设为 0 可关闭以省 CPU。
+ */
+#ifndef MORAL_LCD_PERIODIC_REFRESH_MS
+#define MORAL_LCD_PERIODIC_REFRESH_MS 50
+#endif
+
 #define EXT_RAM_ADDRESS 0x0000000
 
 #define INT_RAM_ADDRESS 0x40000000

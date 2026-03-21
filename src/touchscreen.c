@@ -1,5 +1,49 @@
 #include "touchscreen.h"
 
+/* 与 vmEvent.c 中触摸中断写入保持一致，便于固件轮询 0x3400C1xx */
+#define MTK_TP_REG_STATUS 0x3400C1BCu
+#define MTK_TP_REG_UNK    0x3400C1C4u
+#define MTK_TP_REG_X      0x3400C1C0u
+#define MTK_TP_REG_Y      0x3400C1C8u
+
+void mtk_touch_regs_sync(void)
+{
+    u32 tmp;
+    if (MTK == NULL)
+        return;
+    u32 sx = touchX;
+    u32 sy = touchY;
+    if (sx >= 240u)
+        sx = 239u;
+    if (sy >= 400u)
+        sy = 399u;
+
+    tmp = sx * 1023u / 240u;
+    uc_mem_write(MTK, MTK_TP_REG_X, &tmp, 4);
+    tmp = sy * 1023u / 400u;
+    uc_mem_write(MTK, MTK_TP_REG_Y, &tmp, 4);
+
+    if (isTouchDown)
+    {
+        tmp = 3;
+        uc_mem_write(MTK, MTK_TP_REG_STATUS, &tmp, 4);
+        tmp = 1;
+        uc_mem_write(MTK, MTK_TP_REG_UNK, &tmp, 4);
+    }
+    else
+    {
+        tmp = 0;
+        uc_mem_write(MTK, MTK_TP_REG_STATUS, &tmp, 4);
+        uc_mem_write(MTK, MTK_TP_REG_UNK, &tmp, 4);
+    }
+}
+
+void mtk_touch_hook_mem_read(uint64_t address)
+{
+    (void)address;
+    mtk_touch_regs_sync();
+}
+
 void InitTouchScreen()
 {
     isTouchDown = 0;
@@ -18,12 +62,12 @@ void handleTouchScreenReg(uint64_t address, u32 data, uint64_t value)
         {
             if (value == TS_CMD_ADDR_X)
             {
-                changeTmp1 = touchX;
+                changeTmp1 = touchX * 1023 / 240;
                 uc_mem_write(MTK, AUX_TS_DATA1, &changeTmp1, 4);
             }
             else if (value == TS_CMD_ADDR_Y)
             {
-                changeTmp1 = touchY;
+                changeTmp1 = touchY * 1023 / 400;
                 uc_mem_write(MTK, AUX_TS_DATA1, &changeTmp1, 4);
             }
             else if (value == TS_CMD_ADDR_Z1)
@@ -37,16 +81,18 @@ void handleTouchScreenReg(uint64_t address, u32 data, uint64_t value)
                 uc_mem_write(MTK, AUX_TS_DATA1, &changeTmp1, 4);
             }
             else
-                printf("write touch command %x\n", value);
+            {
+                changeTmp1 = 0x350;
+                uc_mem_write(MTK, AUX_TS_DATA1, &changeTmp1, 4);
+            }
         }
         break;
-    case AUX_BASE: // 写1变0
+    case AUX_BASE:
         if (data == 0)
         {
             tmp = 0;
             uc_mem_write(MTK, AUX_BASE, &tmp, 4);
-            // 写入adc值，电量为一格
-            tmp = 0xfff;
+            tmp = 0x350;
             uc_mem_write(MTK, AUX_UnkReg, &tmp, 4);
         }
         break;

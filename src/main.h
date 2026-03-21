@@ -13,6 +13,38 @@
 #include "keypad.h"
 
 /**
+ * 按 Surface 实际 BytesPerPixel 写像素（勿假定 32 位 + x*4，否则会整屏竖条/花屏）。
+ * c 须为 SDL_MapRGB(s->format, ...) 对该 surface 编码后的值。
+ */
+static inline void SDL_PutPixel32(SDL_Surface *s, unsigned x, unsigned y, Uint32 c)
+{
+    Uint8 *p = (Uint8 *)s->pixels + y * (unsigned)s->pitch + x * (unsigned)s->format->BytesPerPixel;
+    switch (s->format->BytesPerPixel)
+    {
+    case 4:
+        *(Uint32 *)p = c;
+        break;
+    case 3:
+#if SDL_BYTEORDER == SDL_BIG_ENDIAN
+        p[0] = (Uint8)((c >> 16) & 0xff);
+        p[1] = (Uint8)((c >> 8) & 0xff);
+        p[2] = (Uint8)(c & 0xff);
+#else
+        p[0] = (Uint8)(c & 0xff);
+        p[1] = (Uint8)((c >> 8) & 0xff);
+        p[2] = (Uint8)((c >> 16) & 0xff);
+#endif
+        break;
+    case 2:
+        *(Uint16 *)p = (Uint16)c;
+        break;
+    default:
+        *(Uint32 *)p = c;
+        break;
+    }
+}
+
+/**
  * 定义
  * 0-1024 为栈空间
  * 1024-4096为代码空间
@@ -141,8 +173,15 @@ u32 Lcd_Update_Y;
 u32 Lcd_Update_W;
 u32 Lcd_Update_H;
 u32 Lcd_Update_Pitch;
-u8 Lcd_Cache_Buffer[240 * 400 * 2];
+u8 Lcd_Cache_Buffer[240 * 400 * 4];
 u8 Lcd_Need_Update = 0;
+/** 由 0x7400313C 首次成功刷屏后置 1；此前禁止周期性显存拉取，避免开机动画/未就绪缓冲花屏 */
+u8 De_PeriodicRefreshAllowed;
+
+u32 DE_Layer0_Ptr;
+u32 DE_Layer0_W;
+u32 DE_Layer0_H;
+u32 DE_Layer0_Pitch;
 
 void my_memcpy(void *dest, void *src, int len)
 {

@@ -91,6 +91,39 @@ void ReadRegsToGdb(int *regPtr)
 }
 #endif
 
+/*
+ * Moral I9：HalRtcGetSecondCount(0x31ad8) 通过 HalAsura + SPI 读外置 RTC，不用 MT6252 的 0x810b。
+ * 在即将执行 STR R5,[R0]（0x31b9c）前覆盖 R5，使状态栏时间与主机本地时间一致。
+ * 秒计数与 _ConvertBCDToSeconds 一致：自本地 2000-01-01 00:00:00 起的秒数（mktime）。
+ */
+static u32 moral_fw_rtc_seconds_since_2000(void)
+{
+    time_t now = time(NULL);
+    struct tm ep;
+    ep.tm_sec = 0;
+    ep.tm_min = 0;
+    ep.tm_hour = 0;
+    ep.tm_mday = 1;
+    ep.tm_mon = 0;
+    ep.tm_year = 100;
+    ep.tm_wday = 0;
+    ep.tm_yday = 0;
+    ep.tm_isdst = -1;
+    time_t t0 = mktime(&ep);
+    if (t0 == (time_t)-1)
+        return 0;
+    long long d = (long long)now - (long long)t0;
+    if (d <= 0)
+        return 0;
+    d += (long long)MORAL_RTC_SECOND_OFFSET;
+    d += (long long)MORAL_RTC_EXTRA_SECONDS;
+    if (d > 0xFFFFFFFFLL)
+        return 0xFFFFFFFFu;
+    if (d < 0)
+        return 0;
+    return (u32)d;
+}
+
 u32 Interrupt_Handler_Entry; // 中断入口地址
 
 u32 IRQ_MASK_LOW_REG = 0x3400183C;
@@ -318,25 +351,26 @@ void keyEvent(int type, int key)
 
 void mouseEvent(int type, int x, int y)
 {
-    //    uc_mem_read(MTK,0x4000AD38, &changeTmp, 4);
-    //    uc_mem_read(MTK,0x4000AD30, &changeTmp1, 4);
-    //    printf("[SDL](TMD_STATE:%x,TMD_Time_Slice:%x)\n", changeTmp, changeTmp1);
-    /*
-        if (!hasISR)
-        {
-            isrStack[0] = 0xF01D283C;
-            isrStack[1] = 1;
-            isrStack[2] = 0;
-            isrStack[4] = 0;
-            ISR_Start_Address = 0x823f7b7;
-            ISR_End_Address = 0x823F7D8;
-            requireSetIsrStack = true;
-            hasISR = true;
-        }
-        */
-    EnqueueVMEvent(VM_EVENT_TOUCH_SCREEN_IRQ, type, 0); // 触摸down/up，先触发detect中断
-    if (type == 1)
-        EnqueueVMEvent(VM_EVENT_TOUCH_SCREEN_IRQ, 3, (x << 16) | y); // 触发adc采样完成
+    if (x < 0)
+        x = 0;
+    else if (x > 239)
+        x = 239;
+    if (y < 0)
+        y = 0;
+    else if (y > 399)
+        y = 399;
+    touchX = (u32)x;
+    touchY = (u32)y;
+    if (type == MR_MOUSE_DOWN)
+        isTouchDown = 1;
+    else if (type == MR_MOUSE_UP)
+        isTouchDown = 0;
+
+    mtk_touch_regs_sync();
+
+    EnqueueVMEvent(VM_EVENT_TOUCH_SCREEN_IRQ, type, 0);
+    if (type == MR_MOUSE_DOWN || type == MR_MOUSE_MOVE)
+        EnqueueVMEvent(VM_EVENT_TOUCH_SCREEN_IRQ, 3, (x << 16) | y);
 }
 
 void loop()
@@ -633,10 +667,33 @@ void initMtkSimalator()
     err = uc_mem_map_ptr(MTK, 0x74000000, size_4mb, UC_PROT_ALL, SDL_malloc(size_4mb));
     //??
     err = uc_mem_map_ptr(MTK, 0x34000000, size_4mb, UC_PROT_ALL, SDL_malloc(size_4mb));
+    // LCD控制器寄存器
+    err = uc_mem_map_ptr(MTK, 0x90000000, size_4mb, UC_PROT_ALL, SDL_malloc(size_4mb));
     if (err)
     {
         printf("Failed mem  Rom map: %u (%s)\n", err, uc_strerror(err));
         return NULL;
+    }
+    /*
+     * MT6252 风格外设地址空间：RTC(0x810b****)、GPT(0x8106****)、AUX 触摸(0x8205****)、
+     * IRQ 旧寄存器(0x8101****)、SDC/SIM 等。此前未映射时 uc_mem_write 无效，
+     * MEM 钩子也不会触发，表现为时间卡在镜像值、触摸/电量逻辑不生效。
+     * 若控制台曾大量出现 hookRamErrorBack「地址无法访问:810xxxxx / 820xxxxx」即此原因。
+     */
+    {
+        void *mtk_peri = SDL_malloc(0x02000000);
+        if (!mtk_peri)
+        {
+            printf("SDL_malloc MTK peripheral pool failed\n");
+            return NULL;
+        }
+        err = uc_mem_map_ptr(MTK, 0x81000000, 0x02000000, UC_PROT_ALL, mtk_peri);
+        if (err != UC_ERR_OK)
+        {
+            printf("Failed map 0x81000000 peripherals: %u (%s)\n", err, uc_strerror(err));
+            return NULL;
+        }
+        printf("[mem] Mapped 0x81000000..0x83000000 (RTC / AUX / GPT / legacy IRQ regs)\n");
     }
     err = uc_hook_add(MTK, &trace[0], UC_HOOK_CODE, hookCodeCallBack, 0, 0, 0xefffffff);
 
@@ -735,18 +792,6 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 
 void FindKeypadData()
 {
-    u8 keypadMagic[] = {0x17, 0xc4, 0x09, 0, 0, 0x17, 0, 0, 0};
-    u8 matchLen = sizeof(keypadMagic) / sizeof(keypadMagic[0]);
-    printf("Find Match Keypad Data...\n");
-    u8 *dataStart = SimpleRamMatch(ROM_MEMPOOL, ROM_MEMPOOL + size_16mb, keypadMagic, matchLen);
-    if (dataStart != NULL)
-    {
-        u32 addr = ((u32)(dataStart - ROM_MEMPOOL)) + ROM_ADDRESS - 0x4f + (matchLen - 1);
-        uc_mem_read(MTK, addr, &keypaddef, sizeof(keypaddef) / sizeof(keypaddef[0]));
-        printf("Find Match Keypad Data Success: 0x%x\n", addr);
-    }
-    else
-        printf("Find Match Keypad Data Failed\n");
 }
 
 void FindRomMpuSettingAddr()
@@ -820,16 +865,19 @@ void MainUpdateTask()
     {
         currentTime = clock();
 
-        // 断点模式下不触发任务
-        if (VmEventCount < MAX_VM_EVENT_COUNT - 50)
-        {
 #ifdef GDB_SERVER_SUPPORT
-            if (gdbTarget.running == 0)
-                continue;
-#endif
-
-            lcdTaskMain();
+        if (gdbTarget.running == 0)
+        {
+            usleep(1000);
+            continue;
         }
+#endif
+        /*
+         * 刷新显示/RTC 不得依赖 VmEventCount。LCD 中断等会高频入队且 Dequeue 很慢，
+         * 队列接近满时若跳过 lcdTaskMain，周期性显存同步停止 → 锁屏后画面与时间“冻住”。
+         */
+        lcdTaskMain();
+        RtcTaskMain();
         if (currentTime > last_gpt1_interrupt_time)
         {
             last_gpt1_interrupt_time = currentTime + 5;
@@ -876,10 +924,11 @@ int main(int argc, char *args[])
         printf("SDL could not initialize! SDL_Error: %s\n", SDL_GetError());
         return -1;
     }
+    /* 勿用 SDL_WINDOW_OPENGL：本工程用 GetWindowSurface 直接写像素，OpenGL 窗口下格式/stride 常异常 → 竖条花屏 */
 #ifdef GDI_LAYER_DEBUG
-    window = SDL_CreateWindow("moral i9 simulato", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SCREEN_WIDTH * 5, SCREEN_HEIGHT, SDL_WINDOW_OPENGL);
+    window = SDL_CreateWindow("moral i9 simulato", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SCREEN_WIDTH * 5, SCREEN_HEIGHT, 0);
 #else
-    window = SDL_CreateWindow("moral i9 simulator", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 240, 400, SDL_WINDOW_OPENGL);
+    window = SDL_CreateWindow("moral i9 simulator", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 240, 400, 0);
 #endif
     if (window == NULL)
     {
@@ -943,12 +992,40 @@ int main(int argc, char *args[])
         uc_mem_read(MTK, 0x34, &Interrupt_Handler_Entry, 4);
         printf("中断处理函数入口地址:%x\n", Interrupt_Handler_Entry);
 
+        {
+            u32 kpd_init = 0xFFFF;
+            uc_mem_write(MTK, 0x34000814, &kpd_init, 4);
+        }
+
+        {
+            time_t now = time(NULL);
+            struct tm *lt = localtime(&now);
+            u32 rtc_val;
+            uc_err rtc_err;
+            rtc_val = lt->tm_sec;
+            rtc_err = uc_mem_write(MTK, RTC_SECOND_REG, &rtc_val, 4);
+            rtc_val = lt->tm_min;
+            rtc_err |= uc_mem_write(MTK, RTC_MINUTE_REG, &rtc_val, 4);
+            rtc_val = lt->tm_hour;
+            rtc_err |= uc_mem_write(MTK, RTC_HOUR_REG, &rtc_val, 4);
+            rtc_val = lt->tm_mday;
+            rtc_err |= uc_mem_write(MTK, RTC_DAY_REG, &rtc_val, 4);
+            rtc_val = lt->tm_wday;
+            rtc_err |= uc_mem_write(MTK, RTC_WEEKDAY_REG, &rtc_val, 4);
+            rtc_val = lt->tm_mon;
+            rtc_err |= uc_mem_write(MTK, RTC_MONTH_REG, &rtc_val, 4);
+            rtc_val = lt->tm_year - 100;
+            rtc_err |= uc_mem_write(MTK, RTC_YEAR_REG, &rtc_val, 4);
+            u32 rb_hour = 0xFFFFFFFFu;
+            uc_mem_read(MTK, RTC_HOUR_REG, &rb_hour, 4);
+            printf("[RTC] init %02d:%02d:%02d write_err=%u readback_hour=%u (若 readback 异常则外设区未映射)\n",
+                   lt->tm_hour, lt->tm_min, lt->tm_sec, (unsigned)rtc_err, rb_hour);
+        }
+
         SD_File_Handle = fopen(SD_CARD_IMG_PATH, "r+b");
         if (SD_File_Handle == NULL)
             printf("没有SD卡镜像文件，跳过加载\n");
 
-        // 禁用缓冲自动刷新
-        // setvbuf(stdout, NULL, _IOFBF, 10240); // 设置缓冲区大小为 10k 字节
         // 启动emu线程
         pthread_create(&emu_thread, NULL, RunArmProgram, ROM_ADDRESS);
         pthread_create(&screen_render_thread, NULL, MainUpdateTask, NULL);
@@ -997,6 +1074,13 @@ void hookBlockCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *use
 void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
     u32 tmp1, tmp2, tmp3, tmp4;
+
+    if (((u32)address & ~1u) == 0x31b9c)
+    {
+        tmp2 = moral_fw_rtc_seconds_since_2000();
+        uc_reg_write(MTK, UC_ARM_REG_R5, &tmp2);
+    }
+
 #ifdef GDB_SERVER_SUPPORT
     tmp2 = gdbTarget.simulate_pc_count;
     if (tmp2 == 0)
@@ -1242,10 +1326,23 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     //     tmp1 = 0x1C00D131;
     //     uc_reg_write(MTK, UC_ARM_REG_PC, &tmp1);
     //     break;
-    // case 0x2cb28:
-    //     EnqueueVMEvent(VM_EVENT_DMA_IRQ, 0, 0);
-    //     // printf("DrvDMA2DCmdFinish\n");
-    //     break;
+    case 0x2cb28: // DrvDMA2DCmdFinish - skip and return success
+    {
+        tmp1 = 1;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp2);
+        uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
+        break;
+    }
+    case 0x2c55e: // DrvDMA2DIsHWBitBlt - force software path
+    case 0x2c5dc: // DrvDMA2DIsHWFillRect - force software path
+    {
+        tmp1 = 0;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp2);
+        uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
+        break;
+    }
     // case 0x1189DA:
     //     uc_reg_read(MTK, UC_ARM_REG_R2, &tmp1);
     //     uc_reg_read(MTK, UC_ARM_REG_R5, &tmp2);

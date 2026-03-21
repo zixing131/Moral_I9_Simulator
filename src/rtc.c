@@ -45,6 +45,7 @@ void RtcTaskMain()
     if (currentTime > last_rtc_interrupt_time)
     {
         last_rtc_interrupt_time = currentTime + 500;
+        Update_RTC_Time();
         EnqueueVMEvent(VM_EVENT_RTC_IRQ, 0, 0);
     }
 }

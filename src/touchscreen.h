@@ -19,3 +19,8 @@ u32 isInitTouch;
 #define AUX_TS_CMD 0x82050054
 #define AUX_TS_CON 0x82050058
 #define AUX_TS_DATA1 0x8205005C
+
+/** 把当前 touchX/Y 写入 MTK 面板寄存器（0x3400C1xx），供固件轮询；鼠标事件里也会调用 */
+void mtk_touch_regs_sync(void);
+/** MEM_READ 钩子：读触摸相关寄存器前刷新，避免仅依赖中断时无坐标 */
+void mtk_touch_hook_mem_read(uint64_t address);

@@ -1,7 +1,12 @@
 #include "main.h"
+#include "touchscreen.h"
+#include <string.h>
 
 bool hookInsnInvalid(uc_engine *uc, void *user_data);
 void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data);
+void handleLcdReg(uint64_t address, u32 data, uint64_t value);
+void handleTouchScreenReg(uint64_t address, u32 data, uint64_t value);
+void handleGptReg(uint64_t address, u32 data, uint64_t value);
 
 u32 halTimerCnt = 0;              // HalTimerUDelay调用
 u32 halTimerCntMax = 0;           // HalTimerUDelay调用
@@ -34,6 +39,166 @@ u16 nandFlashCMDData[32];
 u32 nandFlashSectorSize = 0;
 u32 nandParamSect = 0;
 u32 LCD_CMD_Data = 0;
+
+#define DE_PANEL_W 240u
+#define DE_PANEL_H 400u
+
+/* 与 0x7400313C 写钩子一致：解析 Layer0 描述符得到真实像素缓冲与 pitch */
+static void de_resolve_layer_source(u32 *srcBuf, u32 *srcPitchBytes, u32 *pixFmt)
+{
+    *srcBuf = Lcd_Buffer_Ptr;
+    *srcPitchBytes = Lcd_Update_Pitch;
+    *pixFmt = 1u; // RGB565
+
+    if (DE_Layer0_Ptr != 0 && DE_Layer0_Ptr != Lcd_Buffer_Ptr)
+    {
+        u32 descBuf[3];
+        uc_mem_read(MTK, DE_Layer0_Ptr, descBuf, 12);
+        u32 layerStructAddr = descBuf[1];
+
+        if (layerStructAddr > 0x1000 && layerStructAddr < 0x8000000)
+        {
+            u32 layerPixBuf = 0;
+            u32 layerFmt = 0;
+            u32 layerPitchPx = 0;
+            uc_mem_read(MTK, layerStructAddr + 24, &layerPixBuf, 4);
+            uc_mem_read(MTK, layerStructAddr + 20, &layerFmt, 4);
+            uc_mem_read(MTK, layerStructAddr + 12, &layerPitchPx, 4);
+
+            static u32 de_dbg = 0;
+            if (de_dbg < 3)
+            {
+                printf("[DE] layer0: struct=0x%x pixbuf=0x%x fmt=%d pitch=%d\n",
+                    layerStructAddr, layerPixBuf, layerFmt, layerPitchPx);
+                if (layerPixBuf > 0x1000 && layerPixBuf < 0x8000000)
+                {
+                    u32 sample[4];
+                    uc_mem_read(MTK, layerPixBuf, sample, 16);
+                    printf("[DE]   pixels: %08x %08x %08x %08x\n",
+                        sample[0], sample[1], sample[2], sample[3]);
+                }
+                de_dbg++;
+            }
+
+            if (layerPixBuf > 0x1000 && layerPixBuf < 0x8000000 && layerPitchPx > 0)
+            {
+                *srcBuf = layerPixBuf;
+                *pixFmt = layerFmt;
+                if (layerFmt == 15u)
+                    *srcPitchBytes = layerPitchPx * 4u;
+                else
+                    *srcPitchBytes = layerPitchPx * 2u;
+            }
+        }
+    }
+
+    /* DE 层像素 pitch（寄存器多为像素单位）常大于可视宽，仅取安全的 *2 / *4 合并，避免误判字节 stride */
+    {
+        const u32 maxRowBytes = (u32)(sizeof(Lcd_Cache_Buffer) / DE_PANEL_H);
+        u32 cand = 0;
+        if (DE_Layer0_Pitch >= DE_PANEL_W && DE_Layer0_Pitch <= 512u)
+        {
+            if (*pixFmt == 15u)
+                cand = DE_Layer0_Pitch * 4u;
+            else
+                cand = DE_Layer0_Pitch * 2u;
+        }
+        if (cand > *srcPitchBytes && cand > 0 && cand <= maxRowBytes)
+            *srcPitchBytes = cand;
+    }
+
+    if (*srcPitchBytes == 0)
+        *srcPitchBytes = (*pixFmt == 15u) ? (DE_PANEL_W * 4u) : (DE_PANEL_W * 2u);
+}
+
+static u32 de_bytes_per_pixel(u32 pixFmt)
+{
+    return (pixFmt == 15u) ? 4u : 2u;
+}
+
+/*
+ * 按「固件真实行距」逐行从 guest 拷到 Lcd_Cache_Buffer，每行只取屏宽像素并紧密排列。
+ * 禁止把 guestStride 人为加大再整块 uc_mem_read，否则会行错位 → 竖条/花屏。
+ */
+static int de_copy_guest_fb_rows_packed(u32 srcBase, u32 guestStrideBytes, u32 pixFmt, u16 height)
+{
+    u32 bpp = de_bytes_per_pixel(pixFmt);
+    u32 packedPitch = DE_PANEL_W * bpp;
+    u32 copyW = packedPitch <= guestStrideBytes ? packedPitch : guestStrideBytes;
+
+    if (guestStrideBytes == 0 || height == 0)
+        return -1;
+    if ((u32)height * packedPitch > sizeof(Lcd_Cache_Buffer))
+        return -1;
+
+    for (u16 y = 0; y < height; y++)
+    {
+        u8 *dst = Lcd_Cache_Buffer + (u32)y * packedPitch;
+        u32 addr = srcBase + (u32)y * guestStrideBytes;
+        if (uc_mem_read(MTK, addr, dst, copyW) != UC_ERR_OK)
+            return -1;
+        if (copyW < packedPitch)
+            memset(dst + copyW, 0, packedPitch - copyW);
+    }
+    return 0;
+}
+
+/*
+ * 将 Lcd_Cache_Buffer 中连续的 roi_h 行（与固件读入方式一致）画到 SDL。
+ * screen_x0/screen_y0 为屏上目标矩形左上角；roi_w/h 为要画的宽高。
+ */
+static void de_blit_cache_to_sdl(u32 pixFmt, u32 srcPitchBytes,
+    u16 screen_x0, u16 screen_y0, u16 roi_w, u16 roi_h)
+{
+    SDL_Surface *sfc = SDL_GetWindowSurface(window);
+    if (!sfc)
+        return;
+
+    for (u16 yi = screen_y0; yi < screen_y0 + roi_h && yi < DE_PANEL_H; yi++)
+    {
+        u8 *rowStart = Lcd_Cache_Buffer + srcPitchBytes * (u32)(yi - screen_y0);
+        for (u16 xi = screen_x0; xi < screen_x0 + roi_w && xi < DE_PANEL_W; xi++)
+        {
+            u8 r, g, b;
+            if (pixFmt == 15u)
+            {
+                u32 *px = (u32 *)(rowStart) + (u32)(xi - screen_x0);
+                u32 argb = *px;
+                b = (u8)(argb & 0xFF);
+                g = (u8)((argb >> 8) & 0xFF);
+                r = (u8)((argb >> 16) & 0xFF);
+            }
+            else
+            {
+                u16 color = *((u16 *)(rowStart) + (xi - screen_x0));
+                r = (u8)PIXEL565R(color);
+                g = (u8)PIXEL565G(color);
+                b = (u8)PIXEL565B(color);
+            }
+            SDL_PutPixel32(sfc, xi, yi, SDL_MapRGB(sfc->format, r, g, b));
+        }
+    }
+}
+
+void de_emulator_periodic_refresh(void)
+{
+    if (!De_PeriodicRefreshAllowed)
+        return;
+
+    u32 srcBuf, guestStride, pixFmt;
+    de_resolve_layer_source(&srcBuf, &guestStride, &pixFmt);
+
+    if (srcBuf < 0x1000u || srcBuf >= 0x8000000u)
+        return;
+    if (guestStride == 0 || guestStride > 8192u)
+        return;
+
+    if (de_copy_guest_fb_rows_packed(srcBuf, guestStride, pixFmt, (u16)DE_PANEL_H) != 0)
+        return;
+
+    de_blit_cache_to_sdl(pixFmt, DE_PANEL_W * de_bytes_per_pixel(pixFmt), 0, 0, DE_PANEL_W, DE_PANEL_H);
+    Lcd_Need_Update = 1;
+}
 
 void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
 {
@@ -197,7 +362,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         {
             Lcd_Buffer_Ptr &= 0xffff0000;
             Lcd_Buffer_Ptr |= (value & 0xffff);
-            // printf("low_lcd_buffer[%x]\n", value);
         }
         break;
     case 0x74003044:
@@ -205,8 +369,33 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         {
             Lcd_Buffer_Ptr &= 0x0000ffff;
             Lcd_Buffer_Ptr |= ((value & 0xffff) << 16);
-            // printf("hi_lcd_buffer[%x]\n", value);
         }
+        break;
+    case 0x74003054:
+        if (type == UC_MEM_WRITE)
+        {
+            DE_Layer0_Ptr &= 0xffff0000;
+            DE_Layer0_Ptr |= (value & 0xffff);
+        }
+        break;
+    case 0x74003058:
+        if (type == UC_MEM_WRITE)
+        {
+            DE_Layer0_Ptr &= 0x0000ffff;
+            DE_Layer0_Ptr |= ((value & 0xffff) << 16);
+        }
+        break;
+    case 0x7400305c:
+        if (type == UC_MEM_WRITE)
+            DE_Layer0_W = value;
+        break;
+    case 0x74003060:
+        if (type == UC_MEM_WRITE)
+            DE_Layer0_H = value;
+        break;
+    case 0x74003064:
+        if (type == UC_MEM_WRITE)
+            DE_Layer0_Pitch = value;
         break;
         // case 0x74003100:
         //     if (type == UC_MEM_WRITE)
@@ -216,11 +405,46 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     case 0x7400313C:
         if (type == UC_MEM_WRITE)
         {
-                uc_mem_read(MTK, Lcd_Buffer_Ptr, Lcd_Cache_Buffer, Lcd_Update_H * Lcd_Update_Pitch);
-                // printf("update lcd xy(%d %d) wh(%d %d) ", Lcd_Update_X, Lcd_Update_Y, Lcd_Update_W, Lcd_Update_H);
-                Lcd_Need_Update = 1;
-                EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
+            u32 srcBuf, guestStride, pixFmt;
+            de_resolve_layer_source(&srcBuf, &guestStride, &pixFmt);
 
+            if (Lcd_Update_H == 0 || Lcd_Update_W == 0 || guestStride == 0 ||
+                srcBuf < 0x1000u || srcBuf >= 0x8000000u)
+            {
+                EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
+                break;
+            }
+
+            u32 bpp = de_bytes_per_pixel(pixFmt);
+            u32 packedPitch = Lcd_Update_W * bpp;
+            u32 copyW = packedPitch <= guestStride ? packedPitch : guestStride;
+            u32 maxRows = (u32)(sizeof(Lcd_Cache_Buffer) / packedPitch);
+            u16 rows = (u16)Lcd_Update_H;
+            if (rows > maxRows)
+                rows = (u16)maxRows;
+
+            u16 ok = 1;
+            for (u16 r = 0; r < rows; r++)
+            {
+                u8 *dst = Lcd_Cache_Buffer + (u32)r * packedPitch;
+                u32 addr = srcBuf + (u32)r * guestStride;
+                if (uc_mem_read(MTK, addr, dst, copyW) != UC_ERR_OK)
+                {
+                    ok = 0;
+                    break;
+                }
+                if (copyW < packedPitch)
+                    memset(dst + copyW, 0, packedPitch - copyW);
+            }
+
+            if (ok)
+            {
+                de_blit_cache_to_sdl(pixFmt, packedPitch,
+                    (u16)Lcd_Update_X, (u16)Lcd_Update_Y, (u16)Lcd_Update_W, rows);
+                Lcd_Need_Update = 1;
+                De_PeriodicRefreshAllowed = 1;
+            }
+            EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
         }
         break;
     case 0x740031A0: // HalDispSetCmdPhase
@@ -821,14 +1045,10 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     case 0x74000408:
         if (type == UC_MEM_WRITE)
         {
-            if ((value & 0x40) != 0x40)
-            {
-                // EnqueueVMEvent(VM_EVENT_DMA_IRQ, 0, 0);
-            }
         }
         else
         {
-            value = (1 << 12);
+            value = (1 << 12) | 2;
             uc_mem_write(MTK, (u32)address, &value, 4);
         }
         break;
@@ -969,6 +1189,17 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     //     }
     //     break;
     default:
+        if (address >= 0x90000000 && address < 0x90001000)
+            handleLcdReg(address, data, value);
+        else if (address >= 0x82050000 && address < 0x82051000)
+            handleTouchScreenReg(address, data, value);
+        else if (address >= 0x3400C100u && address < 0x3400C200u && type == UC_MEM_READ)
+            mtk_touch_hook_mem_read(address);
+        else if (address >= 0x81060000 && address < 0x81060100)
+            handleGptReg(address, data, value);
+        else if (address >= 0x74003000 && address < 0x74005000 && type == UC_MEM_WRITE)
+        {
+        }
         break;
     }
 }

@@ -13,6 +13,7 @@ void ClearLayer(lcdLayer *ll)
 
 void InitLcd()
 {
+    De_PeriodicRefreshAllowed = 0;
     for (int i = 0; i < 4; i++)
     {
         ClearLayer(&lcdLayerList[i]);
@@ -42,47 +43,36 @@ void Draw_Loading_Process()
         for (i = 0; i < (int)(rect.w * p); i++)
         {
             offset = (i + j * rect.w);
-            *((Uint32 *)screenSurface->pixels + offset) = SDL_MapRGB(screenSurface->format, 0x00, 0x96, 0x88);
+            SDL_PutPixel32(screenSurface, (unsigned)i, (unsigned)j,
+                SDL_MapRGB(screenSurface->format, 0x00, 0x96, 0x88));
         }
     }
 }
 
 void renderGdiBufferToWindow()
 {
-    // 获取窗口的表面
-    SDL_Surface *screenSurface = SDL_GetWindowSurface(window);
-    lcdLayer *layer;
-    u16 i;
-    u16 color;
-    u32 offset;
-    u32 offset2;
-    u32 colorCache;
     if (Lcd_Need_Update)
     {
-        for (i = Lcd_Update_Y; i < (Lcd_Update_Y + Lcd_Update_H); i++)
-        {
-            if (i >= 400)
-                continue;
-            u16 *lineStart = (u16 *)(Lcd_Cache_Buffer + Lcd_Update_Pitch * (i - Lcd_Update_Y));
-            for (u16 j = Lcd_Update_X; j < (Lcd_Update_X + Lcd_Update_W); j++)
-            {
-                if (j >= 240)
-                    continue;
-                color = *(lineStart + (j - Lcd_Update_X));
-                offset = i * 240 + j;
-                //  不是透明的，覆盖上个图层颜色
-                *((Uint32 *)screenSurface->pixels + offset) = SDL_MapRGB(screenSurface->format, PIXEL565R(color), PIXEL565G(color), PIXEL565B(color));
-            }
-        }
         Lcd_Need_Update = 0;
-        printf("LCD Update Ok\n");
+        SDL_UpdateWindowSurface(window);
     }
-    // 更新窗口
-    SDL_UpdateWindowSurface(window);
 }
 
 void lcdTaskMain()
 {
+#if MORAL_LCD_PERIODIC_REFRESH_MS > 0
+    static clock_t last_de_poll = 0;
+    clock_t threshold = (clock_t)(MORAL_LCD_PERIODIC_REFRESH_MS * CLOCKS_PER_SEC / 1000);
+    if (threshold < 1)
+        threshold = 1;
+    if (last_de_poll == 0)
+        last_de_poll = currentTime;
+    if ((clock_t)(currentTime - last_de_poll) >= threshold)
+    {
+        last_de_poll = currentTime;
+        de_emulator_periodic_refresh();
+    }
+#endif
 
     if (Lcd_Need_Update)
     {
@@ -92,8 +82,69 @@ void lcdTaskMain()
     if (currentTime > render_time)
     {
         render_time = currentTime + 5;
-        // EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
     }
+}
+
+void compositeLayers()
+{
+    SDL_Surface *sfc = SDL_GetWindowSurface(window);
+    if (!sfc) return;
+
+    u32 roiW = lcdRegionOfInterest_st.roi_width;
+    u32 roiH = lcdRegionOfInterest_st.roi_height;
+    if (roiW == 0 || roiW > 240) roiW = 240;
+    if (roiH == 0 || roiH > 400) roiH = 400;
+
+    u16 bgColor = (u16)lcdRegionOfInterest_st.background;
+    for (u32 y = 0; y < roiH; y++)
+    {
+        for (u32 x = 0; x < roiW; x++)
+        {
+            SDL_PutPixel32(sfc, x, y, SDL_MapRGB(sfc->format,
+                PIXEL565R(bgColor), PIXEL565G(bgColor), PIXEL565B(bgColor)));
+        }
+    }
+
+    for (int l = 0; l < 4; l++)
+    {
+        lcdLayer *layer = &lcdLayerList[l];
+        if (!layer->enable || layer->buffer_ptr == 0 ||
+            layer->width == 0 || layer->height == 0 || layer->pitch == 0)
+            continue;
+
+        u32 bufSize = layer->pitch * layer->height;
+        u32 maxRows = layer->height;
+        if (bufSize > sizeof(Lcd_Cache_Buffer))
+        {
+            bufSize = sizeof(Lcd_Cache_Buffer);
+            maxRows = bufSize / layer->pitch;
+        }
+
+        uc_mem_read(MTK, layer->buffer_ptr, Lcd_Cache_Buffer, bufSize);
+
+        for (u32 y = 0; y < maxRows; y++)
+        {
+            u32 destY = y + layer->offset_y;
+            if (destY >= roiH) break;
+
+            u16 *lineStart = (u16 *)(Lcd_Cache_Buffer + layer->pitch * y);
+            for (u32 x = 0; x < layer->width; x++)
+            {
+                u32 destX = x + layer->offset_x;
+                if (destX >= roiW) break;
+
+                u16 color = *(lineStart + x);
+
+                if (layer->src_key_enable && color == (u16)layer->transparent_color)
+                    continue;
+
+                SDL_PutPixel32(sfc, destX, destY, SDL_MapRGB(sfc->format,
+                    PIXEL565R(color), PIXEL565G(color), PIXEL565B(color)));
+            }
+        }
+    }
+
+    Lcd_Need_Update = 1;
 }
 
 inline void handleLcdReg(uint64_t address, u32 data, uint64_t value)
@@ -109,11 +160,11 @@ inline void handleLcdReg(uint64_t address, u32 data, uint64_t value)
             EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
         }
         break;
-    case 0x9000000c: // LCD Interface Frame Transfer Register
-        if (data == 1 && value == 0x8000)
+    case 0x9000000c: // LCD_START - Frame Transfer
+        if (data == 1 && (value & 0x8000))
         {
-            // 需要更新显示
-            lcdUpdateFlag = true;
+            compositeLayers();
+            EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
         }
         break;
     case 0x900000b0:
@@ -149,12 +200,8 @@ inline void handleLcdReg(uint64_t address, u32 data, uint64_t value)
         {
             tmp = (address - LCD_BASE - 0xb0) / 0x30;
             layer = &lcdLayerList[tmp];
-            if (layer->offset_x != 0 || layer->offset_y != 0)
-            {
-                layer->offset_x = (value & 0xffff);
-                layer->offset_y = ((value >> 16) & 0xffff);
-                printf("layer[%d] offset_x:%d offset_y:%d\n", tmp, layer->offset_x, layer->offset_y);
-            }
+            layer->offset_x = (value & 0xffff);
+            layer->offset_y = ((value >> 16) & 0xffff);
         }
         break;
     case 0x900000bc: // display start address
@@ -169,21 +216,20 @@ inline void handleLcdReg(uint64_t address, u32 data, uint64_t value)
         break;
     case 0x900000c8:
     case 0x900000f8:
-    case 0x900000128:
-    case 0x900000158:
+    case 0x90000128:
+    case 0x90000158:
         if (data == 1)
         {
             tmp = (address - LCD_BASE - 0xc0) / 0x30;
             layer = &lcdLayerList[tmp];
             layer->memory_offx = value & 0xffff;
             layer->memory_offy = (value >> 16) & 0xffff;
-            // printf("layer[%d] memory_offx:%d memory_offy:%d\n", tmp, layer->memory_offx, layer->memory_offy);
         }
         break;
-    case 0x900000cc: // 一行像素多少字节
+    case 0x900000cc:
     case 0x900000fc:
-    case 0x90000012c:
-    case 0x90000015c:
+    case 0x9000012c:
+    case 0x9000015c:
         if (data == 1 && value > 0)
         {
             tmp = (address - LCD_BASE - 0xc0) / 0x30;
@@ -192,7 +238,7 @@ inline void handleLcdReg(uint64_t address, u32 data, uint64_t value)
             printf("Init Lcd layer[%d] Pitch %d\n", tmp, layer->pitch);
             if (layer->width > 0 && layer->height > 0)
             {
-                if (layer->lcdBuffer == NULL) // 只初始化一次
+                if (layer->lcdBuffer == NULL)
                 {
                     layer->lcdBuffer = malloc(layer->pitch * layer->height);
                     printf("Init Lcd layer[%d] %d %d\n", tmp, layer->width, layer->height);
@@ -224,9 +270,8 @@ inline void handleLcdReg(uint64_t address, u32 data, uint64_t value)
     case 0x90000084:
         if (data == 1)
         {
-            lcdRegionOfInterest_st.roi_sx = value & 0xffff - 1024;         // x
-            lcdRegionOfInterest_st.roi_sy = (value >> 16) & 0xffff - 1024; // y
-            printf("set roi sx:%d sy:%d\n", lcdRegionOfInterest_st.roi_sx, lcdRegionOfInterest_st.roi_sy);
+            lcdRegionOfInterest_st.roi_sx = (value & 0xffff);
+            lcdRegionOfInterest_st.roi_sy = ((value >> 16) & 0xffff);
         }
         break;
     case 0x9000008c:
@@ -238,12 +283,11 @@ inline void handleLcdReg(uint64_t address, u32 data, uint64_t value)
     case 0x90000090:
         if (data == 1 && value != 0)
         {
-            lcdRegionOfInterest_st.roi_width = value & 0xffff;          // x
-            lcdRegionOfInterest_st.roi_height = (value >> 16) & 0xffff; // y
+            lcdRegionOfInterest_st.roi_width = value & 0xffff;
+            lcdRegionOfInterest_st.roi_height = (value >> 16) & 0xffff;
             printf("set roi width:%d height:%d\n", lcdRegionOfInterest_st.roi_width, lcdRegionOfInterest_st.roi_height);
         }
         break;
-
     case 0x9000009c:
         if (data == 1)
         {
