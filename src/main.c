@@ -370,10 +370,10 @@ void mouseEvent(int type, int x, int y)
         isTouchDown = 0;
 
     mtk_touch_regs_sync();
-    /* 让 handleVmEvent_EMU 尽快走 IRQ29 ADC 路径，避免仅靠队列+IRQ31 */
     moral_vm_touch_adc_request((u32)x, (u32)y);
 
-    EnqueueVMEvent(VM_EVENT_TOUCH_SCREEN_IRQ, type, (x << 16) | y);
+    if (type != MR_MOUSE_MOVE)
+        EnqueueVMEvent(VM_EVENT_TOUCH_SCREEN_IRQ, type, (x << 16) | y);
 }
 
 void loop()
@@ -1152,8 +1152,15 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
 
     if (((u32)address & ~1u) == 0x31b9c)
     {
-        tmp2 = moral_fw_rtc_seconds_since_2000();
-        uc_reg_write(MTK, UC_ARM_REG_R5, &tmp2);
+        static u32 cached_rtc = 0;
+        static clock_t last_rtc_time = 0;
+        clock_t now = clock();
+        if (cached_rtc == 0 || (now - last_rtc_time) >= CLOCKS_PER_SEC)
+        {
+            last_rtc_time = now;
+            cached_rtc = moral_fw_rtc_seconds_since_2000();
+        }
+        uc_reg_write(MTK, UC_ARM_REG_R5, &cached_rtc);
     }
 
 #ifdef GDB_SERVER_SUPPORT

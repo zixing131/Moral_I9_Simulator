@@ -122,6 +122,46 @@ static u32 auxadc_get_result(void)
  */
 static u8 de_blit_logged = 0;
 
+static void de_blit_rgb565_to_surface(SDL_Surface *sfc, u8 *srcBuf, u16 dstX, u16 dstY, u16 w, u16 h, u32 cachePitch)
+{
+    if (!sfc || !srcBuf)
+        return;
+
+    u32 sfcBpp = (u32)sfc->format->BytesPerPixel;
+    u32 sfcPitch = (u32)sfc->pitch;
+
+    for (u16 yi = 0; yi < h && (dstY + yi) < (u16)sfc->h; yi++)
+    {
+        u16 *srcRow = (u16 *)(srcBuf + cachePitch * (u32)yi);
+        u8 *dstRow = (u8 *)sfc->pixels + sfcPitch * (u32)(dstY + yi) + sfcBpp * (u32)dstX;
+        u16 maxW = w;
+        if (dstX + maxW > (u16)sfc->w)
+            maxW = (u16)sfc->w - dstX;
+
+        if (sfcBpp == 4)
+        {
+            u32 *dst32 = (u32 *)dstRow;
+            for (u16 xi = 0; xi < maxW; xi++)
+            {
+                u16 c = srcRow[xi];
+                u32 r = (c >> 11) & 0x1F;
+                u32 g = (c >> 5) & 0x3F;
+                u32 b = c & 0x1F;
+                dst32[xi] = (0xFFu << 24) | ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
+            }
+        }
+        else
+        {
+            for (u16 xi = 0; xi < maxW; xi++)
+            {
+                u16 color = srcRow[xi];
+                SDL_PutPixel32(sfc, dstX + xi, dstY + yi,
+                    SDL_MapRGB(sfc->format, (u8)PIXEL565R(color), (u8)PIXEL565G(color), (u8)PIXEL565B(color)));
+            }
+        }
+    }
+}
+
 static void de_blit_to_sdl(u16 dstX, u16 dstY, u16 w, u16 h, u32 cachePitch)
 {
     SDL_Surface *sfc = SDL_GetWindowSurface(window);
@@ -135,18 +175,7 @@ static void de_blit_to_sdl(u16 dstX, u16 dstY, u16 w, u16 h, u32 cachePitch)
                sfc->w, sfc->h, sfc->pitch, sfc->format->BytesPerPixel, sfc->format->Rmask);
     }
 
-    for (u16 yi = 0; yi < h && (dstY + yi) < DE_PANEL_H; yi++)
-    {
-        u8 *row = Lcd_Cache_Buffer + cachePitch * (u32)yi;
-        for (u16 xi = 0; xi < w && (dstX + xi) < DE_PANEL_W; xi++)
-        {
-            u16 color = *((u16 *)row + xi);
-            u8 r = (u8)PIXEL565R(color);
-            u8 g = (u8)PIXEL565G(color);
-            u8 b = (u8)PIXEL565B(color);
-            SDL_PutPixel32(sfc, dstX + xi, dstY + yi, SDL_MapRGB(sfc->format, r, g, b));
-        }
-    }
+    de_blit_rgb565_to_surface(sfc, Lcd_Cache_Buffer, dstX, dstY, w, h, cachePitch);
 }
 
 static int de_read_fb(u32 srcAddr, u32 guestPitch, u16 w, u16 h)
@@ -212,19 +241,7 @@ static void de_blit_from(u8 *srcCache, u16 dstX, u16 dstY, u16 w, u16 h, u32 cac
     SDL_Surface *sfc = SDL_GetWindowSurface(window);
     if (!sfc)
         return;
-
-    for (u16 yi = 0; yi < h && (dstY + yi) < DE_PANEL_H; yi++)
-    {
-        u8 *row = srcCache + cachePitch * (u32)yi;
-        for (u16 xi = 0; xi < w && (dstX + xi) < DE_PANEL_W; xi++)
-        {
-            u16 color = *((u16 *)row + xi);
-            u8 r = (u8)PIXEL565R(color);
-            u8 g = (u8)PIXEL565G(color);
-            u8 b = (u8)PIXEL565B(color);
-            SDL_PutPixel32(sfc, dstX + xi, dstY + yi, SDL_MapRGB(sfc->format, r, g, b));
-        }
-    }
+    de_blit_rgb565_to_surface(sfc, srcCache, dstX, dstY, w, h, cachePitch);
 }
 
 void de_emulator_periodic_refresh(void)
@@ -500,6 +517,19 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
 
             if (de_read_fb(srcBuf, pitch, w, h) == 0)
             {
+                u32 *firstWords = (u32 *)Lcd_Cache_Buffer;
+                u32 fw0 = firstWords[0], fw1 = firstWords[1];
+                if (w >= DE_PANEL_W && h >= DE_PANEL_H &&
+                    (fw1 >= 0x80000u && fw1 < 0x8000000u))
+                {
+                    if (de_trigger_cnt <= 5)
+                        printf("[DE-trigger] #%u skipped (metadata detected: %08x %08x)\n",
+                               de_trigger_cnt, fw0, fw1);
+                    tmp = 0xF00;
+                    uc_mem_write(MTK, 0x74003148u, &tmp, 4);
+                    EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
+                    break;
+                }
                 de_blit_to_sdl((u16)Lcd_Update_X, (u16)Lcd_Update_Y, w, h, (u32)w * DE_BPP);
                 Lcd_Need_Update = 1;
                 De_LastTriggerTime = clock();
@@ -1331,20 +1361,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         }
         else if (address >= 0x81060000 && address < 0x81060100)
             handleGptReg(address, data, value);
-        else if (address >= 0x74003000 && address < 0x74005000)
-        {
-            if (type == UC_MEM_READ && address == 0x74003148u)
-            {
-                static u32 busyloop_read_cnt = 0;
-                busyloop_read_cnt++;
-                if (busyloop_read_cnt <= 5 || (busyloop_read_cnt % 50000) == 0)
-                {
-                    u32 cur_val = 0;
-                    uc_mem_read(MTK, 0x74003148u, &cur_val, 4);
-                    printf("[DE-status-read] #%u val=0x%x\n", busyloop_read_cnt, cur_val);
-                }
-            }
-        }
+        /* DE register range 0x74003000-0x74005000: no special handling needed */
         break;
     }
 }
