@@ -369,7 +369,6 @@ void mouseEvent(int type, int x, int y)
     else if (type == MR_MOUSE_UP)
         isTouchDown = 0;
 
-    mtk_touch_regs_sync();
     moral_vm_touch_adc_request((u32)x, (u32)y);
 
     if (type != MR_MOUSE_MOVE)
