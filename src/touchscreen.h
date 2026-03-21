@@ -27,5 +27,7 @@ extern u32 isInitTouch;
 void mtk_touch_regs_sync(void);
 /** MEM_READ 钩子：读触摸相关寄存器前刷新，避免仅依赖中断时无坐标 */
 void mtk_touch_hook_mem_read(uint64_t address);
+/** 每次 pen-DOWN 时重置固件触摸状态（PressCount / 邮箱等），防止触摸状态机卡死 */
+void moral_touch_on_pen_down(void);
 
 #endif /* TOUCHSCREEN_H */

@@ -188,6 +188,11 @@ inline void handleVmEvent_EMU(uint64_t address)
                         touch_adc_x = rawX;
                         touch_adc_y = rawY;
                         pending_touch_active = 0;
+                        if (tevt.r0 == MR_MOUSE_DOWN)
+                        {
+                            moral_touch_on_pen_down();
+                            auxadc_log_count = 0;
+                        }
                     }
                     else
                     {

@@ -142,6 +142,36 @@ void mtk_touch_hook_mem_read(uint64_t address)
     mtk_touch_regs_sync();
 }
 
+void moral_touch_on_pen_down(void)
+{
+    u32 zero32 = 0;
+    u8 one = 1;
+    if (MTK == NULL)
+        return;
+
+    for (unsigned bi = 0; bi < sizeof MMI_TOUCH_MAIL_BASES / sizeof MMI_TOUCH_MAIL_BASES[0]; bi++)
+    {
+        u32 base = MMI_TOUCH_MAIL_BASES[bi];
+        u16 mbox;
+
+        /* _gnTouchScreenPressCount: 过大时 DoMainJob 跳过 MsSend → 触摸消息无法上报 */
+        uc_mem_write(MTK, base - 0x34u, &zero32, 4);
+
+        /* 邮箱饱和时重置，避免 MsSend 发送失败 */
+        if (uc_mem_read(MTK, base, &mbox, 2) == UC_ERR_OK && mbox >= 200u)
+        {
+            u16 z = 0;
+            uc_mem_write(MTK, base, &z, 2);
+        }
+
+        /* 确保触摸使能标志有效 */
+        uc_mem_write(MTK, base + 2u, &one, 1);
+
+        /* 清释放计数，防止卡在释放状态机 */
+        uc_mem_write(MTK, base - 0x0cu, &zero32, 4);
+    }
+}
+
 void InitTouchScreen()
 {
     isTouchDown = 0;
