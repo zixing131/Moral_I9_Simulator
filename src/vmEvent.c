@@ -153,6 +153,7 @@ inline void handleVmEvent_EMU(uint64_t address)
                     break;
                 }
             }
+            (void)have_evt;
         }
 
         if (have_evt)
