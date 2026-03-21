@@ -260,6 +260,17 @@ void de_emulator_periodic_refresh(void)
     if (srcBuf < 0x1000u || srcBuf >= 0x8000000u)
         return;
 
+    /* Validate: probe first 8 bytes to avoid displaying descriptor data */
+    {
+        u8 probe[8];
+        if (uc_mem_read(MTK, srcBuf, probe, 8) == UC_ERR_OK)
+        {
+            u32 w1 = *(u32 *)(probe + 4);
+            if (w1 >= 0xD0000u && w1 < 0x2000000u)
+                return;
+        }
+    }
+
     u32 pitch = DE_PANEL_W * DE_BPP;
 
     if (de_read_fb_to(Lcd_Periodic_Buffer, sizeof(Lcd_Periodic_Buffer),
@@ -496,6 +507,10 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             u16 w = (u16)Lcd_Update_W;
             u16 h = (u16)Lcd_Update_H;
 
+            static u32 de_trigger_cnt = 0;
+            static u32 boot_desc_buf = 0;
+            de_trigger_cnt++;
+
             if (w == 0 || h == 0 || srcBuf < 0x1000u || srcBuf >= 0x8000000u)
             {
                 tmp = 0xF00;
@@ -503,12 +518,37 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
                 break;
             }
+
+            /*
+             * Boot descriptor detection: the first full-screen DE trigger often
+             * points to a layer descriptor table, not pixel data. Remember that
+             * address and skip it on subsequent triggers too.
+             */
+            if (de_trigger_cnt == 1 && w >= DE_PANEL_W && h >= DE_PANEL_H)
+                boot_desc_buf = srcBuf;
+
+            if (srcBuf == boot_desc_buf && w >= DE_PANEL_W && h >= DE_PANEL_H)
+            {
+                u8 probe[8];
+                if (uc_mem_read(MTK, srcBuf, probe, 8) == UC_ERR_OK)
+                {
+                    u32 w1 = *(u32 *)(probe + 4);
+                    if (w1 >= 0xD0000u && w1 < 0x2000000u)
+                    {
+                        tmp = 0xF00;
+                        uc_mem_write(MTK, 0x74003148u, &tmp, 4);
+                        EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
+                        break;
+                    }
+                    else
+                        boot_desc_buf = 0;
+                }
+            }
+
             if (w > DE_PANEL_W) w = (u16)DE_PANEL_W;
             if (h > DE_PANEL_H) h = (u16)DE_PANEL_H;
             if (pitch == 0u) pitch = (u32)w * DE_BPP;
 
-            static u32 de_trigger_cnt = 0;
-            de_trigger_cnt++;
             if (de_trigger_cnt <= 20 || (de_trigger_cnt % 100) == 0)
             {
                 printf("[DE-trigger] #%u buf=0x%x pitch=%u w=%u h=%u\n",
@@ -517,32 +557,10 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
 
             if (de_read_fb(srcBuf, pitch, w, h) == 0)
             {
-                /* 检测帧缓冲区是否包含描述符/元数据而非像素数据：
-                 * 如果前 16 字节中包含看起来像内存地址（0xD0000-0x1000000 范围）的值，
-                 * 则认为是描述符，不渲染此帧（避免开机花屏） */
-                u32 skip = 0;
-                if (w >= DE_PANEL_W && h >= DE_PANEL_H)
-                {
-                    u32 *fw = (u32 *)Lcd_Cache_Buffer;
-                    u32 addr_like = 0;
-                    for (int ci = 0; ci < 4; ci++)
-                    {
-                        if (fw[ci] >= 0xD0000u && fw[ci] < 0x2000000u)
-                            addr_like++;
-                    }
-                    if (addr_like >= 2)
-                        skip = 1;
-                }
-                if (skip)
-                {
-                    tmp = 0xF00;
-                    uc_mem_write(MTK, 0x74003148u, &tmp, 4);
-                    EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
-                    break;
-                }
                 de_blit_to_sdl((u16)Lcd_Update_X, (u16)Lcd_Update_Y, w, h, (u32)w * DE_BPP);
                 Lcd_Need_Update = 1;
-                De_LastTriggerTime = clock();
+                if (w >= 100u && h >= 100u)
+                    De_LastTriggerTime = clock();
                 if (w >= (DE_PANEL_W - 20u) && h >= (DE_PANEL_H - 80u))
                 {
                     Lcd_FullScreen_Ptr = srcBuf;
@@ -681,21 +699,13 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         {
             if (value == 0x11FFF || value == 0x10FFF) // HalFcieWaitMieEvent的逻辑
             {
-                // 看门狗重置后mie_event重置为0x200??
                 FICE_Status = 0x02000200;
-
-                // nandFlashCmdIdx = 0;
-                // my_memset(nandFlashCMDData, 0, sizeof(nandFlashCMDData));
             }
-            // printf("watch dog reset v:%x\n", value);
         }
         break;
     case NC_MIE_EVENT: // FCIE 状态寄存器
         if (type == UC_MEM_READ)
         {
-            // tmp = 0xffff;
-            // uc_mem_write(MTK, (u32)address, &tmp, 4);
-            // printf("read fcie %x\n", FICE_Status);
             uc_mem_write(MTK, (u32)address, &FICE_Status, 4);
         }
         else
@@ -1098,7 +1108,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     //     }
     //     break;
     case 0x74005044:
-        if (type == UC_MEM_WRITE && value != 0) // 写入0才是执行?
+        if (type == UC_MEM_WRITE && value != 0)
         {
             uc_mem_read(MTK, 0x74005200, &SD_CMD_Buff, 32);
             u32 *p = SD_CMD_Buff;
@@ -1309,6 +1319,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         if (type == UC_MEM_WRITE)
         {
             SD_CMD_Buff_Idx = 0;
+            FICE_Status = 0;
         }
         break;
     case 0xD08DA8: // ConfigRfDone hwlrf_FirstLoadPll

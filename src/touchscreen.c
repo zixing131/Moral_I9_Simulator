@@ -128,11 +128,10 @@ void mtk_touch_regs_sync(void)
         uc_mem_write(MTK, MTK_TP_REG_UNK, &tmp, 4);
     }
 
-    static clock_t last_patch_time = 0;
-    clock_t now = clock();
-    if (last_patch_time == 0 || (now - last_patch_time) >= (clock_t)(500 * CLOCKS_PER_SEC / 1000))
+    static u8 patch_done = 0;
+    if (!patch_done)
     {
-        last_patch_time = now;
+        patch_done = 1;
         moral_touch_mmi_ram_patch();
     }
 }

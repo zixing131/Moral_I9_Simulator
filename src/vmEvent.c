@@ -6,6 +6,7 @@
 static u8  touch_adc_pending = 0;
 static u32 touch_adc_x = 0;
 static u32 touch_adc_y = 0;
+static u8  touch_irq_pending = 0;
 
 void moral_vm_touch_adc_request(u32 x, u32 y)
 {
@@ -54,6 +55,8 @@ int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
             evt->event = event;
             evt->r0 = r0;
             evt->r1 = r1;
+            if (event == VM_EVENT_TOUCH_SCREEN_IRQ)
+                touch_irq_pending = 1;
             vmIsLock = 0;
         }
         else
@@ -143,9 +146,10 @@ inline void handleVmEvent_EMU(uint64_t address)
         }
     }
 
-    /* 触摸 DOWN/UP 事件不受 handleTick 节流，立即从队列中查找并处理 */
-    if (VmEventCount > 0 && vmIsLock == 0)
+    /* 触摸 DOWN/UP 事件不受 handleTick 节流，仅在有待处理的触摸事件时扫描队列 */
+    if (touch_irq_pending && VmEventCount > 0 && vmIsLock == 0)
     {
+        touch_irq_pending = 0;
         u32 i;
         for (i = 0; i < VmEventCount; i++)
         {
@@ -249,47 +253,6 @@ inline void handleVmEvent_EMU(uint64_t address)
                     EnqueueVMEvent(VM_EVENT_DMA_IRQ, 0, 0);
                 break;
             case VM_EVENT_TOUCH_SCREEN_IRQ:
-                if (vmEvent->r0 != 3)
-                {
-                    IRQ_MASK_SET_L_Data |= (1u << 31);
-                    if (vmEvent->r0 == MR_MOUSE_UP)
-                    {
-                        tmp = 0;
-                        uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
-                        uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
-                    }
-                    else
-                    {
-                        tmp = 3;
-                        uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
-                        tmp = 1;
-                        uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
-                    }
-
-                if (StartInterrupt(31, address))
-                {
-                    u32 rawX = (vmEvent->r1 >> 16) & 0xffff;
-                    u32 rawY = vmEvent->r1 & 0xffff;
-                    if (rawX == 0 && rawY == 0)
-                    {
-                        rawX = touchX;
-                        rawY = touchY;
-                    }
-
-                    touch_adc_pending = 1;
-                    touch_adc_x = rawX;
-                    touch_adc_y = rawY;
-                }
-                    else
-                        EnqueueVMEvent(vmEvent->event, vmEvent->r0, vmEvent->r1);
-                }
-                else
-                {
-                    touch_adc_pending = 1;
-                    touch_adc_x = (vmEvent->r1 >> 16) & 0xffff;
-                    touch_adc_y = vmEvent->r1 & 0xffff;
-                }
-
                 break;
             case VM_EVENT_RTC_IRQ:
                 /* 时间已在 RtcTaskMain() 里 Update_RTC_Time()；此处只投递中断。

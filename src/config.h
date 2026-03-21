@@ -43,7 +43,7 @@
  * 仅靠钩子无法刷新界面（时钟冻结、黑屏等）。设为 0 可关闭以省 CPU。
  */
 #ifndef MORAL_LCD_PERIODIC_REFRESH_MS
-#define MORAL_LCD_PERIODIC_REFRESH_MS 16
+#define MORAL_LCD_PERIODIC_REFRESH_MS 33
 #endif
 
 #define EXT_RAM_ADDRESS 0x0000000
