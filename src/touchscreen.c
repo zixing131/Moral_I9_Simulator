@@ -19,6 +19,36 @@ static const u32 MMI_TOUCH_MAIL_BASES[] = {
     0xD09198u,
 };
 
+/*
+ * 校准地址（IDA XRAM 段）：
+ * _gtCalibrationInfo @ 0xD0F3D8  —  X offset
+ *       dword_D0F3DC              —  X scale
+ *       dword_D0F3E0              —  Y offset
+ *       dword_D0F3E4              —  Y scale
+ *
+ * 固件转换公式：
+ *   screenX = (adcX - X_offset) * X_scale / 4096
+ *   screenY = (adcY - Y_offset) * Y_scale / 4096
+ *
+ * 模拟器 ADC 映射：adcX = touchX*1023/240,  adcY = touchY*1023/400
+ * 令 offset=0，scale = 4096 * screenDim / 1023
+ *   X_scale = 4096*240/1023 ≈ 961
+ *   Y_scale = 4096*400/1023 ≈ 1602
+ */
+#define CALIB_X_OFFSET_ADDR 0xD0F3D8u
+#define CALIB_X_SCALE_ADDR  0xD0F3DCu
+#define CALIB_Y_OFFSET_ADDR 0xD0F3E0u
+#define CALIB_Y_SCALE_ADDR  0xD0F3E4u
+
+static void moral_touch_calibration_patch(void)
+{
+    u32 v;
+    v = 0;    uc_mem_write(MTK, CALIB_X_OFFSET_ADDR, &v, 4);
+    v = 961;  uc_mem_write(MTK, CALIB_X_SCALE_ADDR,  &v, 4);
+    v = 0;    uc_mem_write(MTK, CALIB_Y_OFFSET_ADDR, &v, 4);
+    v = 1602; uc_mem_write(MTK, CALIB_Y_SCALE_ADDR,  &v, 4);
+}
+
 static void moral_touch_mmi_ram_patch(void)
 {
     u8 one = 1;
@@ -29,6 +59,9 @@ static void moral_touch_mmi_ram_patch(void)
 
     if (MTK == NULL)
         return;
+
+    moral_touch_calibration_patch();
+
     for (bi = 0; bi < sizeof MMI_TOUCH_MAIL_BASES / sizeof MMI_TOUCH_MAIL_BASES[0]; bi++)
     {
         u32 base = MMI_TOUCH_MAIL_BASES[bi];
