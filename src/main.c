@@ -1196,6 +1196,8 @@ void hookBlockCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *use
  * pc指针指向此地址时执行(未执行此地址的指令)
  */
 
+u8 mssend_pop_log = 0;
+
 void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
     u32 tmp1, tmp2, tmp3, tmp4;
@@ -1308,10 +1310,21 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
      * 绕过固件触摸屏校准转换，直接返回 SDL 屏幕坐标。
      * 固件校准公式依赖 NVRAM 中的校准数据（X/Y offset+scale），在模拟器中
      * 这些值可能为零或与模拟器的 ADC 映射不匹配，导致坐标全部错误。
-     * _MdlTouchscreenGetXCoordination @0x219878: R0=rawADC → 直接返回 touchX
-     * _MdlTouchscreenGetYCoordination @0x219848: R0=rawADC → 直接返回 touchY
      */
-    /* GetXCoord/GetYCoord logging removed for performance */
+    if (((u32)address & ~1u) == 0x219878u) /* _MdlTouchscreenGetXCoordination */
+    {
+        tmp1 = touchX;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp2);
+        uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
+    }
+    if (((u32)address & ~1u) == 0x219848u) /* _MdlTouchscreenGetYCoordination */
+    {
+        tmp1 = touchY;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp2);
+        uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
+    }
 
     switch (address)
     {
@@ -1334,7 +1347,6 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
                 u16 w6 = (u16)hdr[6] | ((u16)hdr[7] << 8);
                 if (hdr[0] == 50u && w2 == 52u && w6 == 17233u)
                 {
-                    static u8 mssend_pop_log = 0;
                     if (mssend_pop_log < 20)
                     {
                         mssend_pop_log++;

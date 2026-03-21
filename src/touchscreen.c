@@ -154,8 +154,23 @@ void moral_touch_on_pen_down(void)
         u32 base = MMI_TOUCH_MAIL_BASES[bi];
         u16 mbox;
 
-        /* _gnTouchScreenPressCount: 过大时 DoMainJob 跳过 MsSend → 触摸消息无法上报 */
+        /*
+         * _gbTSState @ base-0x28 (0xD09170): MdlTouchScreenPenDetect 仅在 state==0 时
+         * 接受新的 pen-detect。强制重置确保新的按下事件不被拒绝。
+         */
+        uc_mem_write(MTK, base - 0x28u, &zero32, 4);
+
+        /* _gncurrentAdcJob @ base-0x48 (0xD09150): 重置 ADC 双采样状态 */
+        uc_mem_write(MTK, base - 0x48u, &zero32, 1);
+
+        /* _gnTouchScreenPressCount @ base-0x34: 过大时固件跳过 MsSend */
         uc_mem_write(MTK, base - 0x34u, &zero32, 4);
+
+        /* _gnTouchADCRepeatCounter @ base-0x2C (0xD0916C): 重置 ADC 重试计数 */
+        uc_mem_write(MTK, base - 0x2Cu, &zero32, 4);
+
+        /* _gnCounterFailureTimes @ base-0x08 (0xD09190): 重置失败计数 */
+        uc_mem_write(MTK, base - 0x08u, &zero32, 4);
 
         /* 邮箱饱和时重置，避免 MsSend 发送失败 */
         if (uc_mem_read(MTK, base, &mbox, 2) == UC_ERR_OK && mbox >= 200u)

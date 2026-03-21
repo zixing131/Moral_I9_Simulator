@@ -192,6 +192,7 @@ inline void handleVmEvent_EMU(uint64_t address)
                         {
                             moral_touch_on_pen_down();
                             auxadc_log_count = 0;
+                            mssend_pop_log = 0;
                         }
                     }
                     else
