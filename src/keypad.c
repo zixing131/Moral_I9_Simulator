@@ -29,9 +29,21 @@ inline void handleKeyPadVmEvent(vm_event *vmEvent, uint64_t address)
 {
     if (vmEvent->event == VM_EVENT_KEYBOARD)
     {
-        SimulatePressKey(vmEvent->r0, vmEvent->r1);
+        u8 key = (u8)vmEvent->r0;
+        u8 press = (u8)vmEvent->r1;
+        static u32 kpd_log = 0;
+        if (kpd_log < 20)
+        {
+            kpd_log++;
+            u8 r = (key < MSTAR_KEY_MAP_SIZE) ? mstarKeyMap[key].row : 0xFF;
+            u8 c = (key < MSTAR_KEY_MAP_SIZE) ? mstarKeyMap[key].col : 0xFF;
+            printf("[KPD] key=%u press=%u row=%u col=%u\n", key, press, r, c);
+        }
+        SimulatePressKey(key, press);
         if (!StartInterrupt(KPD_IRQ_LINE, address))
             EnqueueVMEvent(vmEvent->event, vmEvent->r0, vmEvent->r1);
+        else if (kpd_log <= 20)
+            printf("[KPD] IRQ12 fired OK\n");
     }
 }
 

@@ -179,6 +179,54 @@ static int de_read_fb(u32 srcAddr, u32 guestPitch, u16 w, u16 h)
 
 static u32 de_periodic_call_cnt = 0;
 
+static int de_read_fb_to(u8 *dstBuf, u32 dstBufSize, u32 srcAddr, u32 guestPitch, u16 w, u16 h)
+{
+    u32 rowBytes = (u32)w * DE_BPP;
+    if (rowBytes == 0 || h == 0)
+        return -1;
+    if ((u32)h * rowBytes > dstBufSize)
+        return -1;
+
+    if (guestPitch == rowBytes)
+    {
+        if (uc_mem_read(MTK, srcAddr, dstBuf, rowBytes * h) != UC_ERR_OK)
+            return -1;
+    }
+    else
+    {
+        for (u16 y = 0; y < h; y++)
+        {
+            u32 readW = (guestPitch < rowBytes) ? guestPitch : rowBytes;
+            u8 *dst = dstBuf + (u32)y * rowBytes;
+            if (uc_mem_read(MTK, srcAddr + (u32)y * guestPitch, dst, readW) != UC_ERR_OK)
+                return -1;
+            if (readW < rowBytes)
+                memset(dst + readW, 0, rowBytes - readW);
+        }
+    }
+    return 0;
+}
+
+static void de_blit_from(u8 *srcCache, u16 dstX, u16 dstY, u16 w, u16 h, u32 cachePitch)
+{
+    SDL_Surface *sfc = SDL_GetWindowSurface(window);
+    if (!sfc)
+        return;
+
+    for (u16 yi = 0; yi < h && (dstY + yi) < DE_PANEL_H; yi++)
+    {
+        u8 *row = srcCache + cachePitch * (u32)yi;
+        for (u16 xi = 0; xi < w && (dstX + xi) < DE_PANEL_W; xi++)
+        {
+            u16 color = *((u16 *)row + xi);
+            u8 r = (u8)PIXEL565R(color);
+            u8 g = (u8)PIXEL565G(color);
+            u8 b = (u8)PIXEL565B(color);
+            SDL_PutPixel32(sfc, dstX + xi, dstY + yi, SDL_MapRGB(sfc->format, r, g, b));
+        }
+    }
+}
+
 void de_emulator_periodic_refresh(void)
 {
     if (!De_PeriodicRefreshAllowed)
@@ -192,10 +240,11 @@ void de_emulator_periodic_refresh(void)
 
     u32 pitch = DE_PANEL_W * DE_BPP;
 
-    if (de_read_fb(srcBuf, pitch, DE_PANEL_W, DE_PANEL_H) != 0)
+    if (de_read_fb_to(Lcd_Periodic_Buffer, sizeof(Lcd_Periodic_Buffer),
+                      srcBuf, pitch, DE_PANEL_W, DE_PANEL_H) != 0)
         return;
 
-    de_blit_to_sdl(0, 0, DE_PANEL_W, DE_PANEL_H, DE_PANEL_W * DE_BPP);
+    de_blit_from(Lcd_Periodic_Buffer, 0, 0, DE_PANEL_W, DE_PANEL_H, DE_PANEL_W * DE_BPP);
     Lcd_Need_Update = 1;
     de_periodic_call_cnt++;
     if (de_periodic_call_cnt <= 5 || (de_periodic_call_cnt % 200) == 0)
@@ -347,16 +396,22 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     //             ;
     //     }
     //     break;
-    // case 0x74003094:
-    //     if (type == UC_MEM_WRITE)
-    //     {
-    //         printf("[lcd]buff_format[%x]\n", value);
-    //     }
-    //     break;
+    case 0x74003094:
+        if (type == UC_MEM_WRITE)
+        {
+            static u32 fmt_cnt = 0;
+            fmt_cnt++;
+            if (fmt_cnt <= 10)
+                printf("[lcd]buff_format[%x] #%u\n", (u32)value, fmt_cnt);
+        }
+        break;
     case 0x7400309C:
         if (type == UC_MEM_WRITE)
         {
-            printf("[lcd]layer_sel[%x]\n", value);
+            static u32 layer_sel_cnt = 0;
+            layer_sel_cnt++;
+            if (layer_sel_cnt <= 10 || (layer_sel_cnt % 500) == 0)
+                printf("[lcd]layer_sel[%x] #%u\n", (u32)value, layer_sel_cnt);
         }
         break;
     case 0x74003040:
@@ -411,13 +466,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         //     {
         //     }
         //     break;
-    case 0x74003148:
-        if (type == UC_MEM_READ)
-        {
-            tmp = 0xF00;
-            uc_mem_write(MTK, (u32)address, &tmp, 4);
-        }
-        break;
     case 0x7400313C:
         if (type == UC_MEM_WRITE)
         {
@@ -428,68 +476,21 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
 
             if (w == 0 || h == 0 || srcBuf < 0x1000u || srcBuf >= 0x8000000u)
             {
+                tmp = 0xF00;
+                uc_mem_write(MTK, 0x74003148u, &tmp, 4);
                 EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
                 break;
             }
-            if (w > DE_PANEL_W)
-                w = (u16)DE_PANEL_W;
-            if (h > DE_PANEL_H)
-                h = (u16)DE_PANEL_H;
-            if (pitch == 0u)
-                pitch = (u32)w * DE_BPP;
+            if (w > DE_PANEL_W) w = (u16)DE_PANEL_W;
+            if (h > DE_PANEL_H) h = (u16)DE_PANEL_H;
+            if (pitch == 0u) pitch = (u32)w * DE_BPP;
 
             static u32 de_trigger_cnt = 0;
             de_trigger_cnt++;
-            if (de_trigger_cnt <= 5 || (de_trigger_cnt % 100) == 0)
+            if (de_trigger_cnt <= 20 || (de_trigger_cnt % 100) == 0)
             {
                 printf("[DE-trigger] #%u buf=0x%x pitch=%u w=%u h=%u\n",
                     de_trigger_cnt, srcBuf, pitch, w, h);
-            }
-
-            if (de_read_fb(srcBuf, pitch, w, h) == 0)
-            {
-                de_blit_to_sdl((u16)Lcd_Update_X, (u16)Lcd_Update_Y, w, h, (u32)w * DE_BPP);
-                Lcd_Need_Update = 1;
-                if (w >= DE_PANEL_W && h >= DE_PANEL_H)
-                {
-                    /* 首帧全屏 DE 常指向未就绪帧缓冲 → 周期读会花屏；跳过第 1 次再允许周期刷新 */
-                    static u8 de_fullscreen_ready_hits;
-                    Lcd_FullScreen_Ptr = srcBuf;
-                    if (de_fullscreen_ready_hits < 250u)
-                        de_fullscreen_ready_hits++;
-                    if (de_fullscreen_ready_hits >= 2u)
-                        De_PeriodicRefreshAllowed = 1;
-                }
-            }
-            EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
-        }
-        break;
-    case 0x74003140: // HalDispSWFMarkTrigger (FMark)
-        if (type == UC_MEM_WRITE && value == 1)
-        {
-            u32 srcBuf = Lcd_Buffer_Ptr;
-            u32 pitch  = Lcd_Update_Pitch;
-            u16 w = (u16)Lcd_Update_W;
-            u16 h = (u16)Lcd_Update_H;
-
-            if (w == 0 || h == 0 || srcBuf < 0x1000u || srcBuf >= 0x8000000u)
-            {
-                EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
-                break;
-            }
-            if (w > DE_PANEL_W)
-                w = (u16)DE_PANEL_W;
-            if (h > DE_PANEL_H)
-                h = (u16)DE_PANEL_H;
-            if (pitch == 0u)
-                pitch = (u32)w * DE_BPP;
-
-            static u32 fmark_trigger_cnt = 0;
-            fmark_trigger_cnt++;
-            if (fmark_trigger_cnt <= 5 || (fmark_trigger_cnt % 100) == 0)
-            {
-                printf("[FMark-trigger] #%u buf=0x%x pitch=%u w=%u h=%u\n",
-                    fmark_trigger_cnt, srcBuf, pitch, w, h);
             }
 
             if (de_read_fb(srcBuf, pitch, w, h) == 0)
@@ -502,7 +503,53 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                     De_PeriodicRefreshAllowed = 1;
                 }
             }
+            tmp = 0xF00;
+            uc_mem_write(MTK, 0x74003148u, &tmp, 4);
             EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
+        }
+        break;
+    case 0x74003140: // HalDispSWFMarkTrigger / HalDispReset both write here
+        if (type == UC_MEM_WRITE)
+        {
+            u32 pc_val;
+            uc_reg_read(MTK, UC_ARM_REG_PC, &pc_val);
+            u32 is_reset = (pc_val >= 0x1ec76u && pc_val <= 0x1ecceu);
+
+            if (value == 0)
+            {
+                static u32 fmark_clear_cnt = 0;
+                fmark_clear_cnt++;
+                if (fmark_clear_cnt <= 10)
+                    printf("[FMark-clear] #%u pc=0x%x %s\n", fmark_clear_cnt, pc_val,
+                           is_reset ? "(HalDispReset)" : "(SWFMark)");
+                tmp = 0xF00;
+                uc_mem_write(MTK, 0x74003148u, &tmp, 4);
+                break;
+            }
+
+            static u32 fmark_trigger_cnt = 0;
+            fmark_trigger_cnt++;
+            if (fmark_trigger_cnt <= 20 || (fmark_trigger_cnt % 100) == 0)
+            {
+                printf("[FMark-trigger] #%u pc=0x%x %s\n", fmark_trigger_cnt, pc_val,
+                       is_reset ? "(HalDispReset)" : "(SWFMark)");
+            }
+
+            if (!is_reset)
+            {
+                u32 srcBuf = Lcd_Buffer_Ptr;
+                u16 w = (u16)Lcd_Update_W;
+                u16 h = (u16)Lcd_Update_H;
+                if (w >= DE_PANEL_W && h >= DE_PANEL_H &&
+                    srcBuf >= 0x1000u && srcBuf < 0x8000000u)
+                {
+                    Lcd_FullScreen_Ptr = srcBuf;
+                    De_PeriodicRefreshAllowed = 1;
+                }
+                EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
+            }
+            tmp = 0xF00;
+            uc_mem_write(MTK, 0x74003148u, &tmp, 4);
         }
         break;
     case 0x740031A0: // HalDispSetCmdPhase
@@ -1279,8 +1326,19 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         }
         else if (address >= 0x81060000 && address < 0x81060100)
             handleGptReg(address, data, value);
-        else if (address >= 0x74003000 && address < 0x74005000 && type == UC_MEM_WRITE)
+        else if (address >= 0x74003000 && address < 0x74005000)
         {
+            if (type == UC_MEM_READ && address == 0x74003148u)
+            {
+                static u32 busyloop_read_cnt = 0;
+                busyloop_read_cnt++;
+                if (busyloop_read_cnt <= 5 || (busyloop_read_cnt % 50000) == 0)
+                {
+                    u32 cur_val = 0;
+                    uc_mem_read(MTK, 0x74003148u, &cur_val, 4);
+                    printf("[DE-status-read] #%u val=0x%x\n", busyloop_read_cnt, cur_val);
+                }
+            }
         }
         break;
     }

@@ -9,14 +9,9 @@ static u32 touch_adc_y = 0;
 
 void moral_vm_touch_adc_request(u32 x, u32 y)
 {
-    if (isTouchDown)
-    {
-        touch_adc_pending = 1;
-        touch_adc_x = x;
-        touch_adc_y = y;
-    }
-    else
-        touch_adc_pending = 0;
+    touch_adc_pending = 1;
+    touch_adc_x = x;
+    touch_adc_y = y;
 }
 
 u32 keyRowIdx = 0;
@@ -122,8 +117,9 @@ inline void handleVmEvent_EMU(uint64_t address)
 {
     u32 tmp;
 
-    /* 延迟 ADC 轮询：每个基本块都检查，在 detect ISR 返回（中断重新使能）后立刻触发 IRQ 29 */
-    if (touch_adc_pending && isTouchDown)
+    /* 延迟 ADC 轮询：每个基本块都检查，在 detect ISR 返回（中断重新使能）后立刻触发 IRQ 29。
+     * 笔抬起时也需要触发一次，让固件读到 Z1=0 正确生成 pen-up 事件。 */
+    if (touch_adc_pending)
     {
         u32 cpsr_val;
         uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_val);
@@ -136,7 +132,7 @@ inline void handleVmEvent_EMU(uint64_t address)
                 uc_mem_write(MTK, 0x3400C1C8, &tmp, 4);
                 tmp = touch_adc_x * 1023 / 240;
                 uc_mem_write(MTK, 0x3400C1C0, &tmp, 4);
-                tmp = 2;
+                tmp = isTouchDown ? 2 : 0;
                 uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
                 printf("handle touch adc: x=%d y=%d\n", touch_adc_x, touch_adc_y);
                 touch_adc_pending = 0;
@@ -213,23 +209,20 @@ inline void handleVmEvent_EMU(uint64_t address)
                         uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
                     }
 
-                    if (StartInterrupt(31, address))
+                if (StartInterrupt(31, address))
+                {
+                    u32 rawX = (vmEvent->r1 >> 16) & 0xffff;
+                    u32 rawY = vmEvent->r1 & 0xffff;
+                    if (rawX == 0 && rawY == 0)
                     {
-                        u32 rawX = (vmEvent->r1 >> 16) & 0xffff;
-                        u32 rawY = vmEvent->r1 & 0xffff;
-                        if (rawX == 0 && rawY == 0)
-                        {
-                            rawX = touchX;
-                            rawY = touchY;
-                        }
-
-                        if (vmEvent->r0 == 1 || vmEvent->r0 == 4)
-                        {
-                            touch_adc_pending = 1;
-                            touch_adc_x = rawX;
-                            touch_adc_y = rawY;
-                        }
+                        rawX = touchX;
+                        rawY = touchY;
                     }
+
+                    touch_adc_pending = 1;
+                    touch_adc_x = rawX;
+                    touch_adc_y = rawY;
+                }
                     else
                         EnqueueVMEvent(vmEvent->event, vmEvent->r0, vmEvent->r1);
                 }

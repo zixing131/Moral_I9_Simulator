@@ -175,6 +175,7 @@ u32 Lcd_Update_W;
 u32 Lcd_Update_H;
 u32 Lcd_Update_Pitch;
 u8 Lcd_Cache_Buffer[240 * 400 * 4];
+u8 Lcd_Periodic_Buffer[240 * 400 * 4];
 u8 Lcd_Need_Update = 0;
 /** 由 0x7400313C 首次成功刷屏后置 1；此前禁止周期性显存拉取，避免开机动画/未就绪缓冲花屏 */
 u8 De_PeriodicRefreshAllowed;

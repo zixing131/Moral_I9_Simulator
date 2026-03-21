@@ -1256,18 +1256,45 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
     }
 
-    /*
-     * DrvLcdCheckPowerStatus @0xcd44（Thumb）：读 bLCDisOn (0xD007F8)。
-     * bLCDisOn 在 BSS 段默认为 0，DispUpdateScreenMdl 据此判「关屏」跳过
-     * DrvLcdUpdate → HalDispForceUpdate → DE trigger 0x7400313C 永不触发。
-     * 强制返回 1（LCD 已开），使触摸后的 UI 刷新走 DrvLcdUpdate 路径。
-     */
     if (((u32)address & ~1u) == 0xcd44u)
     {
         tmp1 = 1;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp2);
         uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
+    }
+
+    /*
+     * HalDispTransAddr @0x1e574: 固件为 DE DMA 做虚拟→物理地址映射 (addr >= 0xC000000 时减去 0xC000000)。
+     * 模拟器中没有这种映射，减去后读到的是另一块内存区域的数据 = 花屏。
+     * 直接跳过，让 DE 寄存器保留固件原始地址。
+     */
+    if (((u32)address & ~1u) == 0x1e574u)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_mem_write(MTK, tmp1, &tmp2, 4);
+        tmp3 = 0;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp3);
+        uc_reg_write(MTK, UC_ARM_REG_PC, &tmp3);
+    }
+
+    if (((u32)address & ~1u) == 0x1ecfcu)
+    {
+        static u32 swfmark_entry_cnt = 0;
+        swfmark_entry_cnt++;
+        if (swfmark_entry_cnt <= 20)
+            printf("[DISP-TRACE] HalDispSWFMarkTrigger ENTRY #%u caller=0x%x\n",
+                   swfmark_entry_cnt, lastAddress);
+    }
+    if (((u32)address & ~1u) == 0x1ec76u)
+    {
+        static u32 reset_entry_cnt = 0;
+        reset_entry_cnt++;
+        if (reset_entry_cnt <= 20)
+            printf("[DISP-TRACE] HalDispReset ENTRY #%u caller=0x%x\n",
+                   reset_entry_cnt, lastAddress);
     }
 
     /*
