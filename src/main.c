@@ -1197,48 +1197,11 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
      * 219712: MdlTouchScreenStatusReport 内 BL MsSend 后的 CMP R0,#10
      * 219df0: _MdlTouchscreenRepeatADCProcess 内 BL MsSend 后的 CMP R0,#10
      */
-    if (((u32)address & ~1u) == 0x219bbeu)
-    {
-        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-        u32 sx = (tmp2 >> 16) & 0xFFFF;
-        u32 sy = tmp2 & 0xFFFF;
-        static u8 report_log = 0;
-        if (report_log < 30)
-        {
-            report_log++;
-            printf("[TS-DBG] StatusReport: calib=%u type=%u screenX=%u screenY=%u R0=0x%x\n",
-                   tmp1 & 0xFF, (tmp1 >> 8) & 0xFF, sx, sy, tmp1);
-        }
-    }
-    if (((u32)address & ~1u) == 0x2198a8u)
-    {
-        u32 z1v = 0, z2v = 0, gx = 0, gy = 0, tsstate = 0;
-        uc_mem_read(MTK, 0xD091B8u, &z1v, 4);
-        uc_mem_read(MTK, 0xD091BCu, &z2v, 4);
-        uc_mem_read(MTK, 0xD0917Cu, &gx, 4);
-        uc_mem_read(MTK, 0xD09180u, &gy, 4);
-        uc_mem_read(MTK, 0xD09170u, &tsstate, 4);
-        static u8 ts_handle_log_cnt = 0;
-        if (ts_handle_log_cnt < 30)
-        {
-            ts_handle_log_cnt++;
-            printf("[TS-DBG] MdlTouchScreenHandle: Z1=%u Z2=%u gX=%u gY=%u down=%d gbTSState=%u\n",
-                   z1v & 0xFFFF, z2v & 0xFFFF, gx & 0xFFFF, gy & 0xFFFF, isTouchDown, tsstate & 0xFF);
-        }
-    }
-    if (((u32)address & ~1u) == 0x21970eu)
-    {
-        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-        printf("[TS-DBG] MsSend called: mbox=%u msgPtr=0x%x\n", tmp1, tmp2);
-    }
     if (((u32)address & ~1u) == 0x219712u || ((u32)address & ~1u) == 0x219df0u)
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         if (tmp1 != 10u)
         {
-            printf("[TS-DBG] MsSend returned %u (forcing 10)\n", tmp1);
             tmp1 = 10u;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
@@ -1280,62 +1243,9 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         uc_reg_write(MTK, UC_ARM_REG_PC, &tmp3);
     }
 
-    /* MdlVkeyParser @0x21bbe: 解析原始按键事件并生成虚拟按键 */
-    if (((u32)address & ~1u) == 0x21bbeu)
-    {
-        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        if (tmp1 >= 0x1000u && tmp1 < 0xF0000000u)
-        {
-            u8 msg[16];
-            if (uc_mem_read(MTK, tmp1, msg, sizeof msg) == UC_ERR_OK)
-            {
-                static u8 parser_log = 0;
-                if (parser_log < 20)
-                {
-                    parser_log++;
-                    printf("[VKEY-PARSER] MdlVkeyParser: mbox=%u type=%u row0=%u col0=%u nrow=%u ncol=%u\n",
-                           msg[0], msg[8], msg[9], msg[11], msg[13], msg[14]);
-                }
-            }
-        }
-    }
+    /* MdlVkeyParser/MdlVkeySendMsg logging removed for performance */
 
-    /* MdlVkeySendMsg @0x21b58: 发送虚拟按键到 MMI。byte[8]=press/release, byte[9]=vkey code */
-    if (((u32)address & ~1u) == 0x21b58u)
-    {
-        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        if (tmp1 >= 0x1000u && tmp1 < 0xF0000000u)
-        {
-            u8 msg[12];
-            if (uc_mem_read(MTK, tmp1, msg, sizeof msg) == UC_ERR_OK)
-            {
-                static u8 vkey_log = 0;
-                if (vkey_log < 30)
-                {
-                    vkey_log++;
-                    printf("[VKEY] MdlVkeySendMsg: mbox=%u press=%u vkey=%u\n",
-                           msg[0], msg[8], msg[9]);
-                }
-            }
-        }
-    }
-
-    if (((u32)address & ~1u) == 0x1ecfcu)
-    {
-        static u32 swfmark_entry_cnt = 0;
-        swfmark_entry_cnt++;
-        if (swfmark_entry_cnt <= 20)
-            printf("[DISP-TRACE] HalDispSWFMarkTrigger ENTRY #%u caller=0x%x\n",
-                   swfmark_entry_cnt, lastAddress);
-    }
-    if (((u32)address & ~1u) == 0x1ec76u)
-    {
-        static u32 reset_entry_cnt = 0;
-        reset_entry_cnt++;
-        if (reset_entry_cnt <= 20)
-            printf("[DISP-TRACE] HalDispReset ENTRY #%u caller=0x%x\n",
-                   reset_entry_cnt, lastAddress);
-    }
+    /* HalDispSWFMarkTrigger/HalDispReset logging removed for performance */
 
     /*
      * 绕过固件触摸屏校准转换，直接返回 SDL 屏幕坐标。
@@ -1344,26 +1254,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
      * _MdlTouchscreenGetXCoordination @0x219878: R0=rawADC → 直接返回 touchX
      * _MdlTouchscreenGetYCoordination @0x219848: R0=rawADC → 直接返回 touchY
      */
-    if (((u32)address & ~1u) == 0x219878u)
-    {
-        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp3);
-        static u8 xcoord_log = 0;
-        if (xcoord_log < 10)
-        {
-            xcoord_log++;
-            printf("[TS-DBG] GetXCoord entered: adcX=%u touchX=%u\n", tmp3, touchX);
-        }
-    }
-    if (((u32)address & ~1u) == 0x219848u)
-    {
-        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp3);
-        static u8 ycoord_log = 0;
-        if (ycoord_log < 10)
-        {
-            ycoord_log++;
-            printf("[TS-DBG] GetYCoord entered: adcY=%u touchY=%u\n", tmp3, touchY);
-        }
-    }
+    /* GetXCoord/GetYCoord logging removed for performance */
 
     switch (address)
     {

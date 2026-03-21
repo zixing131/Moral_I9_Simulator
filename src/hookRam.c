@@ -103,7 +103,7 @@ static u32 auxadc_get_result(void)
         result = isTouchDown ? 400u : 0u;
         break;
     }
-    if (auxadc_log_count < 48)
+    if (auxadc_log_count < 5)
     {
         auxadc_log_count++;
         printf("[ADC-read] raw_cmd=0x%x eff_ch=0x%x result=%u down=%d x=%u y=%u\n",
