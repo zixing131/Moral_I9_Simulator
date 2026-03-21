@@ -48,22 +48,37 @@ u32 LCD_CMD_Data = 0;
  */
 static u32 auxadc_last_cmd = 0;
 
+static u8 auxadc_log_count = 0;
+
 static u32 auxadc_get_result(void)
 {
     u32 cmd12 = auxadc_last_cmd & 0xFFF;
+    u32 result;
     switch (cmd12)
     {
     case 0x711: /* X 坐标通道 */
-        return (touchX < 240u ? touchX : 239u) * 1023u / 240u;
+        result = (touchX < 240u ? touchX : 239u) * 1023u / 240u;
+        break;
     case 0xB81: /* Y 坐标通道 */
-        return (touchY < 400u ? touchY : 399u) * 1023u / 400u;
+        result = (touchY < 400u ? touchY : 399u) * 1023u / 400u;
+        break;
     case 0x781: /* Z1 压力通道 — 返回 0 触发 MdlTouchscreenGetADCData 旁路 */
-        return isTouchDown ? 0u : 1023u;
+        result = isTouchDown ? 0u : 1023u;
+        break;
     case 0x7B1: /* Z2 压力通道 — 与 Z1=0 配合触发旁路路径 */
-        return isTouchDown ? 1023u : 0u;
+        result = isTouchDown ? 1023u : 0u;
+        break;
     default: /* 电阻测量等其他通道 */
-        return isTouchDown ? 0u : 1023u;
+        result = isTouchDown ? 0u : 1023u;
+        break;
     }
+    if (auxadc_log_count < 30)
+    {
+        auxadc_log_count++;
+        printf("[ADC-read] cmd=0x%x ch=0x%x result=%u down=%d x=%u y=%u\n",
+               auxadc_last_cmd, cmd12, result, isTouchDown, touchX, touchY);
+    }
+    return result;
 }
 
 #define DE_PANEL_W 240u
@@ -136,13 +151,13 @@ void de_emulator_periodic_refresh(void)
     if (!De_PeriodicRefreshAllowed)
         return;
 
-    u32 srcBuf = Lcd_Buffer_Ptr;
-    u32 pitch = Lcd_Update_Pitch;
-
+    u32 srcBuf = Lcd_FullScreen_Ptr;
+    if (srcBuf < 0x1000u || srcBuf >= 0x8000000u)
+        srcBuf = Lcd_Buffer_Ptr;
     if (srcBuf < 0x1000u || srcBuf >= 0x8000000u)
         return;
-    if (pitch == 0u)
-        pitch = DE_PANEL_W * DE_BPP;
+
+    u32 pitch = DE_PANEL_W * DE_BPP;
 
     if (de_read_fb(srcBuf, pitch, DE_PANEL_W, DE_PANEL_H) != 0)
         return;
@@ -311,21 +326,20 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     case 0x74003040:
         if (type == UC_MEM_WRITE)
         {
-            u32 old = Lcd_Buffer_Ptr;
             Lcd_Buffer_Ptr &= 0xffff0000;
             Lcd_Buffer_Ptr |= (value & 0xffff);
-            if (Lcd_Buffer_Ptr != old)
-                printf("[DE-buf] ptr changed: 0x%x -> 0x%x\n", old, Lcd_Buffer_Ptr);
+            if (Lcd_Update_W >= DE_PANEL_W && Lcd_Update_H >= DE_PANEL_H &&
+                Lcd_Buffer_Ptr >= 0x1000u && Lcd_Buffer_Ptr < 0x8000000u)
+            {
+                Lcd_FullScreen_Ptr = Lcd_Buffer_Ptr;
+            }
         }
         break;
     case 0x74003044:
         if (type == UC_MEM_WRITE)
         {
-            u32 old = Lcd_Buffer_Ptr;
             Lcd_Buffer_Ptr &= 0x0000ffff;
             Lcd_Buffer_Ptr |= ((value & 0xffff) << 16);
-            if (Lcd_Buffer_Ptr != old)
-                printf("[DE-buf] ptr changed: 0x%x -> 0x%x\n", old, Lcd_Buffer_Ptr);
         }
         break;
     case 0x74003054:
@@ -392,6 +406,8 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 de_blit_to_sdl((u16)Lcd_Update_X, (u16)Lcd_Update_Y, w, h, (u32)w * DE_BPP);
                 Lcd_Need_Update = 1;
                 De_PeriodicRefreshAllowed = 1;
+                if (w >= DE_PANEL_W && h >= DE_PANEL_H)
+                    Lcd_FullScreen_Ptr = srcBuf;
             }
             EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
         }

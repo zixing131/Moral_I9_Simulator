@@ -168,6 +168,7 @@ typedef struct VM_DMA_CONFIG_
 } VM_DMA_CONFIG;
 
 u32 Lcd_Buffer_Ptr;
+u32 Lcd_FullScreen_Ptr;
 u32 Lcd_Update_X;
 u32 Lcd_Update_Y;
 u32 Lcd_Update_W;
