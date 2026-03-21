@@ -1200,9 +1200,9 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         else if (address >= 0x3400C080u && address < 0x3400C400u)
         {
             /* 触摸 AUXADC：命令可能在 C180~C18C，数据读或为半字/字节 */
-            if (type == UC_MEM_WRITE && address >= 0x3400C180u && address <= 0x3400C18Cu)
+            if (type == UC_MEM_WRITE && address == 0x3400C184u)
                 auxadc_last_cmd = (u32)value;
-            else if (type == UC_MEM_READ && address >= 0x3400C198u && address <= 0x3400C1A8u)
+            else if (type == UC_MEM_READ && address == 0x3400C198u)
             {
                 tmp = auxadc_get_result();
                 if (size >= 4)
