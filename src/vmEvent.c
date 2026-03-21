@@ -185,16 +185,15 @@ inline void handleVmEvent_EMU(uint64_t address)
                 break;
             case VM_EVENT_TOUCH_SCREEN_IRQ:
                 if (vmEvent->r0 != 3)
-                { // detect中断 (IRQ 31 = HalTSPenDetIrqHandler)
+                {
+                    IRQ_MASK_SET_L_Data |= (1u << 31);
+                    tmp = 3;
+                    uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
+                    tmp = 1;
+                    uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+
                     if (StartInterrupt(31, address))
                     {
-                        printf("handle touch down/up:%d\n", vmEvent->r0);
-                        tmp = 3;
-                        uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
-                        tmp = 1;
-                        uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
-
-                        /* 预写坐标到寄存器 */
                         u32 rawX = (vmEvent->r1 >> 16) & 0xffff;
                         u32 rawY = vmEvent->r1 & 0xffff;
                         if (rawX == 0 && rawY == 0)
@@ -202,12 +201,7 @@ inline void handleVmEvent_EMU(uint64_t address)
                             rawX = touchX;
                             rawY = touchY;
                         }
-                        tmp = rawY * 1023 / 400;
-                        uc_mem_write(MTK, 0x3400C1C8, &tmp, 4);
-                        tmp = rawX * 1023 / 240;
-                        uc_mem_write(MTK, 0x3400C1C0, &tmp, 4);
 
-                        /* 标记 ADC pending，由顶部轮询在 ISR 返回后触发 IRQ 29 */
                         if (vmEvent->r0 == 1 || vmEvent->r0 == 4)
                         {
                             touch_adc_pending = 1;
@@ -219,7 +213,7 @@ inline void handleVmEvent_EMU(uint64_t address)
                         EnqueueVMEvent(vmEvent->event, vmEvent->r0, vmEvent->r1);
                 }
                 else
-                { // 旧路径的 ADC 事件（不再从 mouseEvent 入队，但保留兼容）
+                {
                     touch_adc_pending = 1;
                     touch_adc_x = (vmEvent->r1 >> 16) & 0xffff;
                     touch_adc_y = vmEvent->r1 & 0xffff;
