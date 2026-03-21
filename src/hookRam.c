@@ -411,6 +411,13 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         //     {
         //     }
         //     break;
+    case 0x74003148:
+        if (type == UC_MEM_READ)
+        {
+            tmp = 0xF00;
+            uc_mem_write(MTK, (u32)address, &tmp, 4);
+        }
+        break;
     case 0x7400313C:
         if (type == UC_MEM_WRITE)
         {
