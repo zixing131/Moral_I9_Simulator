@@ -11,6 +11,32 @@ u32 isInitTouch;
 #define MTK_TP_REG_X      0x3400C1C0u
 #define MTK_TP_REG_Y      0x3400C1C8u
 
+/*
+ * MMI 内部 RAM 触摸全局量（IDA：_gtTouchScreenSusbribeData 0xd09198、byte_D0919A、gReEnableTouchScreenFlag）
+ * 链接基址按 0x0D000000 + 偏移，与 uc_mem_map_ptr(0x0d000000, ...) 一致。
+ * - byte_D0919A：非 0 才走 MdlTouchScreenStatusReport
+ * - gReEnableTouchScreenFlag：为 0 时 _MdlTouchscreenRepeatADCProcess 走失败/诊断分支（日志里 0x18000918/0x8000918）
+ */
+#define MMI_TOUCH_GT_MAIL_U16   0x0D009198u
+#define MMI_TOUCH_REPORT_EN_U8  0x0D00919Au
+#define MMI_TOUCH_REENABLE_U8   0x0D00919Cu
+
+static void moral_touch_mmi_ram_patch(void)
+{
+    u8 one = 1;
+    u16 mbox;
+
+    if (MTK == NULL)
+        return;
+    uc_mem_write(MTK, MMI_TOUCH_REPORT_EN_U8, &one, 1);
+    uc_mem_write(MTK, MMI_TOUCH_REENABLE_U8, &one, 1);
+    if (uc_mem_read(MTK, MMI_TOUCH_GT_MAIL_U16, &mbox, 2) == UC_ERR_OK && mbox == 255u)
+    {
+        u16 z = 0;
+        uc_mem_write(MTK, MMI_TOUCH_GT_MAIL_U16, &z, 2);
+    }
+}
+
 void mtk_touch_regs_sync(void)
 {
     u32 tmp;
@@ -41,6 +67,8 @@ void mtk_touch_regs_sync(void)
         uc_mem_write(MTK, MTK_TP_REG_STATUS, &tmp, 4);
         uc_mem_write(MTK, MTK_TP_REG_UNK, &tmp, 4);
     }
+
+    moral_touch_mmi_ram_patch();
 }
 
 void mtk_touch_hook_mem_read(uint64_t address)

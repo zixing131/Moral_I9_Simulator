@@ -1116,6 +1116,32 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     // }
     switch (address)
     {
+    /*
+     * MsSend @0x34d236：POP {R4-R6,PC}，RtkSend 返回后 R4=邮箱 R5=消息指针。
+     * 触摸上报包：byte0=50，offset2 半字=52，offset6 半字=17233（MdlTouchScreenStatusReport / RepeatADC）。
+     * 模拟器里 RtkSend 常非 10，导致 UI 收不到触摸；仅对触摸包强制 RTK 成功码 10。
+     */
+    case 0x34d236:
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R4, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R5, &tmp3);
+        if (tmp1 != 10u && tmp3 >= 0x1000u && tmp3 < 0xF0000000u)
+        {
+            u8 hdr[8];
+            if (uc_mem_read(MTK, tmp3, hdr, sizeof hdr) == UC_ERR_OK)
+            {
+                u16 w2 = (u16)hdr[2] | ((u16)hdr[3] << 8);
+                u16 w6 = (u16)hdr[6] | ((u16)hdr[7] << 8);
+                if (hdr[0] == 50u && w2 == 52u && w6 == 17233u)
+                {
+                    tmp1 = 10;
+                    uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+                }
+            }
+        }
+        break;
+    }
     // case 0x41BF4:
     //     printf("HalPagingSpiBusTransactionStart %x\n", lastAddress);
     //     break;

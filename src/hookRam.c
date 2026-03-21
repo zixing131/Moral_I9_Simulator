@@ -415,8 +415,13 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 Lcd_Need_Update = 1;
                 if (w >= DE_PANEL_W && h >= DE_PANEL_H)
                 {
+                    /* 首帧全屏 DE 常指向未就绪帧缓冲 → 周期读会花屏；跳过第 1 次再允许周期刷新 */
+                    static u8 de_fullscreen_ready_hits;
                     Lcd_FullScreen_Ptr = srcBuf;
-                    De_PeriodicRefreshAllowed = 1;
+                    if (de_fullscreen_ready_hits < 250u)
+                        de_fullscreen_ready_hits++;
+                    if (de_fullscreen_ready_hits >= 2u)
+                        De_PeriodicRefreshAllowed = 1;
                 }
             }
             EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
