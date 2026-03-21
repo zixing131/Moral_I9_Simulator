@@ -517,14 +517,24 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
 
             if (de_read_fb(srcBuf, pitch, w, h) == 0)
             {
-                u32 *firstWords = (u32 *)Lcd_Cache_Buffer;
-                u32 fw0 = firstWords[0], fw1 = firstWords[1];
-                if (w >= DE_PANEL_W && h >= DE_PANEL_H &&
-                    (fw1 >= 0x80000u && fw1 < 0x8000000u))
+                /* 检测帧缓冲区是否包含描述符/元数据而非像素数据：
+                 * 如果前 16 字节中包含看起来像内存地址（0xD0000-0x1000000 范围）的值，
+                 * 则认为是描述符，不渲染此帧（避免开机花屏） */
+                u32 skip = 0;
+                if (w >= DE_PANEL_W && h >= DE_PANEL_H)
                 {
-                    if (de_trigger_cnt <= 5)
-                        printf("[DE-trigger] #%u skipped (metadata detected: %08x %08x)\n",
-                               de_trigger_cnt, fw0, fw1);
+                    u32 *fw = (u32 *)Lcd_Cache_Buffer;
+                    u32 addr_like = 0;
+                    for (int ci = 0; ci < 4; ci++)
+                    {
+                        if (fw[ci] >= 0xD0000u && fw[ci] < 0x2000000u)
+                            addr_like++;
+                    }
+                    if (addr_like >= 2)
+                        skip = 1;
+                }
+                if (skip)
+                {
                     tmp = 0xF00;
                     uc_mem_write(MTK, 0x74003148u, &tmp, 4);
                     EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);

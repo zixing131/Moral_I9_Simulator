@@ -143,7 +143,61 @@ inline void handleVmEvent_EMU(uint64_t address)
         }
     }
 
-    if (handleTick++ > 800)
+    /* 触摸 DOWN/UP 事件不受 handleTick 节流，立即从队列中查找并处理 */
+    if (VmEventCount > 0 && vmIsLock == 0)
+    {
+        u32 i;
+        for (i = 0; i < VmEventCount; i++)
+        {
+            if (VmEventHandleList[i].event == VM_EVENT_TOUCH_SCREEN_IRQ)
+            {
+                vm_event tevt = VmEventHandleList[i];
+                u32 j;
+                VmEventCount--;
+                for (j = i; j < VmEventCount; j++)
+                    VmEventHandleList[j] = VmEventHandleList[j + 1];
+
+                if (tevt.r0 != 3)
+                {
+                    IRQ_MASK_SET_L_Data |= (1u << 31);
+                    if (tevt.r0 == MR_MOUSE_UP)
+                    {
+                        tmp = 0;
+                        uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
+                        uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+                    }
+                    else
+                    {
+                        tmp = 3;
+                        uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
+                        tmp = 1;
+                        uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+                    }
+                    if (StartInterrupt(31, address))
+                    {
+                        u32 rawX = (tevt.r1 >> 16) & 0xffff;
+                        u32 rawY = tevt.r1 & 0xffff;
+                        if (rawX == 0 && rawY == 0)
+                        { rawX = touchX; rawY = touchY; }
+                        touch_adc_pending = 1;
+                        touch_adc_x = rawX;
+                        touch_adc_y = rawY;
+                    }
+                    else
+                        EnqueueVMEvent(tevt.event, tevt.r0, tevt.r1);
+                }
+                else
+                {
+                    touch_adc_pending = 1;
+                    touch_adc_x = (tevt.r1 >> 16) & 0xffff;
+                    touch_adc_y = tevt.r1 & 0xffff;
+                }
+                break;
+            }
+        }
+    }
+
+    if (handleTick++ > 1000)
     {
         handleTick = 0;
         vmEvent = DequeueVMEvent();
