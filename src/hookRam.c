@@ -232,6 +232,11 @@ void de_emulator_periodic_refresh(void)
     if (!De_PeriodicRefreshAllowed)
         return;
 
+    clock_t now = clock();
+    clock_t idle_threshold = (clock_t)(100 * CLOCKS_PER_SEC / 1000);
+    if (De_LastTriggerTime != 0 && (now - De_LastTriggerTime) < idle_threshold)
+        return;
+
     u32 srcBuf = Lcd_FullScreen_Ptr;
     if (srcBuf < 0x1000u || srcBuf >= 0x8000000u)
         srcBuf = Lcd_Buffer_Ptr;
@@ -497,7 +502,8 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             {
                 de_blit_to_sdl((u16)Lcd_Update_X, (u16)Lcd_Update_Y, w, h, (u32)w * DE_BPP);
                 Lcd_Need_Update = 1;
-                if (w >= DE_PANEL_W && h >= DE_PANEL_H)
+                De_LastTriggerTime = clock();
+                if (w >= (DE_PANEL_W - 20u) && h >= (DE_PANEL_H - 80u))
                 {
                     Lcd_FullScreen_Ptr = srcBuf;
                     De_PeriodicRefreshAllowed = 1;
