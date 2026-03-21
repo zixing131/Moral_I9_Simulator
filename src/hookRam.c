@@ -41,6 +41,27 @@ u32 nandFlashSectorSize = 0;
 u32 nandParamSect = 0;
 u32 LCD_CMD_Data = 0;
 
+/*
+ * AUX ADC 触摸采样模拟。
+ * 固件通过写 0x3400C184 选择 ADC 通道，再读 0x3400C198 取 10-bit 结果。
+ * 通道命令：0x711 → X，0xB81 → Y，其余 → 压力值
+ */
+static u32 auxadc_last_cmd = 0;
+
+static u32 auxadc_get_result(void)
+{
+    u32 cmd12 = auxadc_last_cmd & 0xFFF;
+    switch (cmd12)
+    {
+    case 0x711:
+        return (touchX < 240u ? touchX : 239u) * 1023u / 240u;
+    case 0xB81:
+        return (touchY < 400u ? touchY : 399u) * 1023u / 400u;
+    default:
+        return isTouchDown ? 32u : 64u;
+    }
+}
+
 #define DE_PANEL_W 240u
 #define DE_PANEL_H 400u
 #define DE_BPP     2u
@@ -99,7 +120,7 @@ static int de_read_fb(u32 srcAddr, u32 guestPitch, u16 w, u16 h)
 
 void de_emulator_periodic_refresh(void)
 {
-    if (!De_PeriodicRefreshAllowed || !LCD_Initialized)
+    if (!De_PeriodicRefreshAllowed)
         return;
 
     u32 srcBuf = Lcd_Buffer_Ptr;
@@ -1102,8 +1123,22 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             handleLcdReg(address, data, value);
         else if (address >= 0x82050000 && address < 0x82051000)
             handleTouchScreenReg(address, data, value);
-        else if (address >= 0x3400C080u && address < 0x3400C400u && type == UC_MEM_READ)
-            mtk_touch_hook_mem_read(address);
+        else if (address >= 0x3400C080u && address < 0x3400C400u)
+        {
+            if (type == UC_MEM_WRITE && address == 0x3400C184u)
+            {
+                auxadc_last_cmd = (u32)value;
+            }
+            else if (type == UC_MEM_READ && address == 0x3400C198u)
+            {
+                tmp = auxadc_get_result();
+                uc_mem_write(MTK, 0x3400C198u, &tmp, 4);
+            }
+            else if (type == UC_MEM_READ)
+            {
+                mtk_touch_hook_mem_read(address);
+            }
+        }
         else if (address >= 0x81060000 && address < 0x81060100)
             handleGptReg(address, data, value);
         else if (address >= 0x74003000 && address < 0x74005000 && type == UC_MEM_WRITE)
