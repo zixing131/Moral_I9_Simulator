@@ -383,7 +383,7 @@ void loop()
     bool isLoop = true;
     while (isLoop)
     {
-        while (SDL_WaitEvent(&ev))
+        while (SDL_PollEvent(&ev))
         {
             if (ev.type == SDL_QUIT)
             {
@@ -422,6 +422,7 @@ void loop()
                 break;
             }
         }
+        SDL_Delay(1);
     }
 
     // 等待线程结束

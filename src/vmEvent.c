@@ -122,33 +122,7 @@ inline void handleVmEvent_EMU(uint64_t address)
 {
     u32 tmp;
 
-    /* 延迟 ADC 轮询：每个基本块都检查，在 detect ISR 返回（中断重新使能）后立刻触发 IRQ 29。
-     * 笔抬起时也需要触发一次，让固件读到 Z1=0 正确生成 pen-up 事件。 */
-    if (touch_adc_pending)
-    {
-        u32 cpsr_val;
-        uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_val);
-        if (!isIRQ_Disable(cpsr_val))
-        {
-            IRQ_MASK_SET_L_Data |= (1u << 29);
-            if (StartInterrupt(29, address))
-            {
-                tmp = touch_adc_y * 1023 / 400;
-                uc_mem_write(MTK, 0x3400C1C8, &tmp, 4);
-                tmp = touch_adc_x * 1023 / 240;
-                uc_mem_write(MTK, 0x3400C1C0, &tmp, 4);
-                tmp = isTouchDown ? 2 : 0;
-                uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
-                static u32 adc_log_cnt = 0;
-                adc_log_cnt++;
-                if (adc_log_cnt <= 10 || (adc_log_cnt % 200) == 0)
-                    printf("handle touch adc: x=%d y=%d\n", touch_adc_x, touch_adc_y);
-                touch_adc_pending = 0;
-            }
-        }
-    }
-
-    /* 触摸 DOWN/UP 事件不受 handleTick 节流，仅在有待处理的触摸事件时扫描队列 */
+    /* 触摸 DOWN/UP 事件优先处理，先触发 pen-detect IRQ 31（匹配真实硬件顺序） */
     if (touch_irq_pending && VmEventCount > 0 && vmIsLock == 0)
     {
         touch_irq_pending = 0;
@@ -203,7 +177,28 @@ inline void handleVmEvent_EMU(uint64_t address)
         }
     }
 
-    if (handleTick++ > 500)
+    /* ADC 触摸坐标：始终写入寄存器供固件轮询，IRQ 可用时额外触发 IRQ 29 加速响应 */
+    if (touch_adc_pending)
+    {
+        u32 ax = touch_adc_x, ay = touch_adc_y;
+        tmp = ay * 1023u / 400u;
+        uc_mem_write(MTK, 0x3400C1C8, &tmp, 4);
+        tmp = ax * 1023u / 240u;
+        uc_mem_write(MTK, 0x3400C1C0, &tmp, 4);
+        tmp = isTouchDown ? 2 : 0;
+        uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+
+        u32 cpsr_val;
+        uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_val);
+        if (!isIRQ_Disable(cpsr_val))
+        {
+            IRQ_MASK_SET_L_Data |= (1u << 29);
+            if (StartInterrupt(29, address))
+                touch_adc_pending = 0;
+        }
+    }
+
+    if (handleTick++ > 200)
     {
         handleTick = 0;
         vmEvent = DequeueVMEvent();
