@@ -13,6 +13,14 @@
 #define ROM_ADDRESS 0
 
 /*
+ * IDA：XRAM 从 0x00D00000（触摸全局 _gtTouchScreenSusbribeData@0xD09198 等）。
+ * 若 [0,0x1000000) 整段映射为 ROM，会与 0x00D00000 重叠 → uc_mem_map_ptr(XRAM) 失败，日志 err 11，触摸补丁无效。
+ */
+#define GUEST_IDA_XRAM_BASE       0x00D00000u
+#define GUEST_IDA_XRAM_SIZE       0x00300000u /* 含 IDA XRAM 与原 16MB 映像尾 [0xD00000,0x1000000) */
+#define GUEST_LOW_IMAGE_MAP_SIZE  0x00D00000u
+
+/*
  * HalRtcGetSecondCount 钩子注入的「秒计数」与 mktime(2000-01-01 00:00:00 本地) 的差值修正。
  * 若状态栏比宿主机慢整 16 小时（例：主机 17:18 显示 01:18），填 57600 (16*3600)。
  * 若已对齐则改为 0。

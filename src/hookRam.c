@@ -50,9 +50,32 @@ static u32 auxadc_last_cmd = 0;
 
 static u8 auxadc_log_count = 0;
 
+/* 固件写入值可能在不同位域带通道号，取多种切片与已知通道表匹配 */
+static u32 auxadc_resolve_channel(u32 cmd)
+{
+    u32 i, j;
+    u32 slices[6];
+    static const u32 known[] = {0x711u, 0xB81u, 0x781u, 0x7B1u, 0x181u, 0x191u};
+    slices[0] = cmd & 0xFFFu;
+    slices[1] = (cmd >> 4) & 0xFFFu;
+    slices[2] = (cmd >> 8) & 0xFFFu;
+    slices[3] = (cmd >> 12) & 0xFFFu;
+    slices[4] = (cmd >> 16) & 0xFFFu;
+    slices[5] = cmd & 0xFFu;
+    for (i = 0; i < 6u; i++)
+    {
+        for (j = 0; j < sizeof(known) / sizeof(known[0]); j++)
+        {
+            if (slices[i] == known[j])
+                return known[j];
+        }
+    }
+    return cmd & 0xFFFu;
+}
+
 static u32 auxadc_get_result(void)
 {
-    u32 cmd12 = auxadc_last_cmd & 0xFFF;
+    u32 cmd12 = auxadc_resolve_channel(auxadc_last_cmd);
     u32 result;
     switch (cmd12)
     {
@@ -75,13 +98,14 @@ static u32 auxadc_get_result(void)
         result = isTouchDown ? 300u : 0u;
         break;
     default:
-        result = isTouchDown ? 300u : 0u;
+        /* 未知通道：有按压时给非饱和值，避免驱动认为开路 */
+        result = isTouchDown ? 400u : 0u;
         break;
     }
-    if (auxadc_log_count < 30)
+    if (auxadc_log_count < 48)
     {
         auxadc_log_count++;
-        printf("[ADC-read] cmd=0x%x ch=0x%x result=%u down=%d x=%u y=%u\n",
+        printf("[ADC-read] raw_cmd=0x%x eff_ch=0x%x result=%u down=%d x=%u y=%u\n",
                auxadc_last_cmd, cmd12, result, isTouchDown, touchX, touchY);
     }
     return result;
@@ -1175,14 +1199,24 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             handleTouchScreenReg(address, data, value);
         else if (address >= 0x3400C080u && address < 0x3400C400u)
         {
-            if (type == UC_MEM_WRITE && address == 0x3400C184u)
-            {
+            /* 触摸 AUXADC：命令可能在 C180~C18C，数据读或为半字/字节 */
+            if (type == UC_MEM_WRITE && address >= 0x3400C180u && address <= 0x3400C18Cu)
                 auxadc_last_cmd = (u32)value;
-            }
-            else if (type == UC_MEM_READ && address == 0x3400C198u)
+            else if (type == UC_MEM_READ && address >= 0x3400C198u && address <= 0x3400C1A8u)
             {
                 tmp = auxadc_get_result();
-                uc_mem_write(MTK, 0x3400C198u, &tmp, 4);
+                if (size >= 4)
+                    uc_mem_write(MTK, (u32)address, &tmp, 4);
+                else if (size == 2)
+                {
+                    u16 half = (u16)(tmp & 0xFFFFu);
+                    uc_mem_write(MTK, (u32)address, &half, 2);
+                }
+                else if (size == 1)
+                {
+                    u8 b = (u8)(tmp & 0xFFu);
+                    uc_mem_write(MTK, (u32)address, &b, 1);
+                }
             }
             else if (type == UC_MEM_READ)
             {

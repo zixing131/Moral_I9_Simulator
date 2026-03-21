@@ -174,6 +174,9 @@ u32 size_4mb = 1024 * 1024 * 4;
 u32 size_1mb = 1024 * 1024;
 u32 size_2kb = 1024 * 2;
 
+/* initMtkSimalator 里 IDA XRAM 后备缓冲首址，供 Find* 在映像溢出段扫 magic */
+static u8 *s_ida_xram_host = NULL;
+
 u32 *isrStackPtr;
 u32 isrStackList[100][17];
 
@@ -367,6 +370,8 @@ void mouseEvent(int type, int x, int y)
         isTouchDown = 0;
 
     mtk_touch_regs_sync();
+    /* 让 handleVmEvent_EMU 尽快走 IRQ29 ADC 路径，避免仅靠队列+IRQ31 */
+    moral_vm_touch_adc_request((u32)x, (u32)y);
 
     EnqueueVMEvent(VM_EVENT_TOUCH_SCREEN_IRQ, type, (x << 16) | y);
 }
@@ -409,11 +414,11 @@ void loop()
                 break;
             case SDL_MOUSEBUTTONDOWN:
                 isMouseDown = true;
-                mouseEvent(MR_MOUSE_DOWN, ev.motion.x, ev.motion.y);
+                mouseEvent(MR_MOUSE_DOWN, ev.button.x, ev.button.y);
                 break;
             case SDL_MOUSEBUTTONUP:
                 isMouseDown = false;
-                mouseEvent(MR_MOUSE_UP, ev.motion.x, ev.motion.y);
+                mouseEvent(MR_MOUSE_UP, ev.button.x, ev.button.y);
                 break;
             }
         }
@@ -546,6 +551,27 @@ bool writeSDFile(u8 *Buffer, u32 startPos, u32 size)
     return true;
 }
 
+/* 线性固件：[0, GUEST_LOW_IMAGE_MAP_SIZE)→低映射；超出写入 GUEST_IDA_XRAM_BASE（与原先连续 16MB 布局一致） */
+static void moral_uc_write_low_and_xram(const u8 *buf, size_t total)
+{
+    if (MTK == NULL || buf == NULL || total == 0)
+        return;
+    const size_t low_max = (size_t)GUEST_LOW_IMAGE_MAP_SIZE;
+    size_t n0 = total < low_max ? total : low_max;
+    uc_mem_write(MTK, ROM_ADDRESS, buf, n0);
+    if (total > low_max)
+    {
+        size_t rest = total - low_max;
+        if (rest > (size_t)GUEST_IDA_XRAM_SIZE)
+            rest = (size_t)GUEST_IDA_XRAM_SIZE;
+        uc_err er = uc_mem_write(MTK, GUEST_IDA_XRAM_BASE, buf + low_max, rest);
+        if (er != UC_ERR_OK)
+            printf("[mem] spill -> XRAM @0x%X err %u (len=%u)\n", GUEST_IDA_XRAM_BASE, er, (unsigned)rest);
+        else if (total - low_max > rest)
+            printf("[mem] WARN: %u bytes beyond low+XRAM not loaded\n", (unsigned)(total - low_max - rest));
+    }
+}
+
 void readFlashFile()
 {
     u8 *tmp;
@@ -575,7 +601,7 @@ void readFlashFile()
         SDL_free(tmp);
         return;
     }
-    uc_mem_write(MTK, ROM_ADDRESS, tmp, size);
+    moral_uc_write_low_and_xram(tmp, size);
     SDL_free(tmp);
     fclose(FLASH_File_Handle);
     printf("Flash文件加载成功\n");
@@ -588,7 +614,18 @@ void saveFlashFile()
     if (FLASH_File_Handle == NULL)
         return;
     char *tmp = SDL_malloc(size_16mb);
-    uc_mem_read(MTK, ROM_ADDRESS, tmp, size_16mb);
+    if (tmp == NULL)
+        return;
+    {
+        const size_t low_n = (size_t)GUEST_LOW_IMAGE_MAP_SIZE;
+        size_t xr = (size_t)size_16mb - low_n;
+        if (xr > (size_t)GUEST_IDA_XRAM_SIZE)
+            xr = (size_t)GUEST_IDA_XRAM_SIZE;
+        uc_mem_read(MTK, ROM_ADDRESS, tmp, low_n);
+        uc_mem_read(MTK, GUEST_IDA_XRAM_BASE, tmp + low_n, xr);
+        if (low_n + xr < (size_t)size_16mb)
+            memset(tmp + low_n + xr, 0, (size_t)size_16mb - low_n - xr);
+    }
     size_t result = fwrite(tmp, 1, size_16mb, FLASH_File_Handle);
     if (result != size_16mb)
     {
@@ -632,8 +669,8 @@ void initMtkSimalator()
 
     ROM2_MEMPOOL = SDL_malloc(size_32mb);
 
-    // 映射ROM
-    err = uc_mem_map_ptr(MTK, ROM_ADDRESS, size_16mb, UC_PROT_ALL, ROM_MEMPOOL);
+    /* 勿映射满 16MB：须留出 0x00D00000 给 IDA XRAM，否则与触摸/MMI 全局量冲突 → err 11 */
+    err = uc_mem_map_ptr(MTK, ROM_ADDRESS, GUEST_LOW_IMAGE_MAP_SIZE, UC_PROT_ALL, ROM_MEMPOOL);
     //??
     err = uc_mem_map_ptr(MTK, 0x8000000, size_32mb, UC_PROT_ALL, ROM2_MEMPOOL);
     //??
@@ -650,6 +687,25 @@ void initMtkSimalator()
     err = uc_mem_map_ptr(MTK, 0x0f000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
     err = uc_mem_map_ptr(MTK, 0x0e000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
     err = uc_mem_map_ptr(MTK, 0x0d000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
+
+    s_ida_xram_host = NULL;
+    {
+        void *ida_xram = SDL_malloc((size_t)GUEST_IDA_XRAM_SIZE);
+        if (!ida_xram)
+            printf("[mem] SDL_malloc IDA XRAM failed\n");
+        else
+        {
+            err = uc_mem_map_ptr(MTK, GUEST_IDA_XRAM_BASE, (size_t)GUEST_IDA_XRAM_SIZE, UC_PROT_ALL, ida_xram);
+            if (err != UC_ERR_OK)
+                printf("[mem] map 0x%X XRAM err %u (%s)\n", GUEST_IDA_XRAM_BASE, err, uc_strerror(err));
+            else
+            {
+                s_ida_xram_host = (u8 *)ida_xram;
+                printf("[mem] Mapped IDA XRAM 0x%X size=0x%X (touch ZI / MMI globals)\n",
+                       GUEST_IDA_XRAM_BASE, (unsigned)GUEST_IDA_XRAM_SIZE);
+            }
+        }
+    }
 
     //??
     err = uc_mem_map_ptr(MTK, 0x10000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
@@ -799,10 +855,24 @@ void FindRomMpuSettingAddr()
     u8 matchLen = sizeof(PMU_Setting_Magic) / sizeof(PMU_Setting_Magic[0]);
 
     printf("Find Match MPU Setting Addr...\n");
-    u8 *dataStart = SimpleRamMatch(ROM_MEMPOOL, ROM_MEMPOOL + size_16mb, (u8 *)PMU_Setting_Magic, matchLen);
+    u8 *dataStart = SimpleRamMatch(ROM_MEMPOOL, ROM_MEMPOOL + (size_t)GUEST_LOW_IMAGE_MAP_SIZE, (u8 *)PMU_Setting_Magic, matchLen);
+    u32 guest_base = ROM_ADDRESS;
+    u8 *pool_base = ROM_MEMPOOL;
+    if (dataStart == NULL && s_ida_xram_host != NULL)
+    {
+        size_t spill = (size_t)size_16mb - (size_t)GUEST_LOW_IMAGE_MAP_SIZE;
+        if (spill > (size_t)GUEST_IDA_XRAM_SIZE)
+            spill = (size_t)GUEST_IDA_XRAM_SIZE;
+        dataStart = SimpleRamMatch(s_ida_xram_host, s_ida_xram_host + spill, (u8 *)PMU_Setting_Magic, matchLen);
+        if (dataStart != NULL)
+        {
+            guest_base = GUEST_IDA_XRAM_BASE;
+            pool_base = s_ida_xram_host;
+        }
+    }
     if (dataStart != NULL)
     {
-        MPU_Setting_ROM_Addr = ((u32)(dataStart - ROM_MEMPOOL)) + ROM_ADDRESS + 32;
+        MPU_Setting_ROM_Addr = ((u32)(dataStart - pool_base)) + guest_base + 32;
         printf("Find  MPU Setting Addr Success:%x\n", MPU_Setting_ROM_Addr);
     }
     else
@@ -816,7 +886,14 @@ void FindNorFlashId()
     u8 matchLen = sizeof(NorFlashID_Magic) / sizeof(NorFlashID_Magic[0]);
 
     printf("Find Match NorFlash ID...\n");
-    u8 *dataStart = SimpleRamMatch(ROM_MEMPOOL, ROM_MEMPOOL + size_16mb, (u8 *)NorFlashID_Magic, matchLen);
+    u8 *dataStart = SimpleRamMatch(ROM_MEMPOOL, ROM_MEMPOOL + (size_t)GUEST_LOW_IMAGE_MAP_SIZE, (u8 *)NorFlashID_Magic, matchLen);
+    if (dataStart == NULL && s_ida_xram_host != NULL)
+    {
+        size_t spill = (size_t)size_16mb - (size_t)GUEST_LOW_IMAGE_MAP_SIZE;
+        if (spill > (size_t)GUEST_IDA_XRAM_SIZE)
+            spill = (size_t)GUEST_IDA_XRAM_SIZE;
+        dataStart = SimpleRamMatch(s_ida_xram_host, s_ida_xram_host + spill, (u8 *)NorFlashID_Magic, matchLen);
+    }
     if (dataStart != NULL)
     {
         NorFlashID = *((u32 *)(dataStart + 25));
@@ -941,7 +1018,7 @@ int main(int argc, char *args[])
         u32 size = 0;
         u8 *tmp = 0;
         tmp = readFile(ROM_PROGRAM_BIN, &size);
-        uc_mem_write(MTK, ROM_ADDRESS, tmp, size);
+        moral_uc_write_low_and_xram(tmp, size);
         SDL_free(tmp);
 
         // // 每隔512字节进行一次检查
@@ -1114,6 +1191,34 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     //     while (1)
     //         ;
     // }
+
+    /*
+     * 触摸 MsSend 返回点（IDA ARM 地址，Thumb 时 PC 可能 +1）：
+     * 219712: MdlTouchScreenStatusReport 内 BL MsSend 后的 CMP R0,#10
+     * 219df0: _MdlTouchscreenRepeatADCProcess 内 BL MsSend 后的 CMP R0,#10
+     */
+    if (((u32)address & ~1u) == 0x219712u || ((u32)address & ~1u) == 0x219df0u)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        if (tmp1 != 10u)
+        {
+            tmp1 = 10u;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        }
+    }
+
+    /*
+     * dev_accGetLCDStatus @0x30f34a（Thumb）：读 main_LCD_Sleep；模拟器 RAM 未镜像时易判「关屏」，
+     * _MdlTouchScreenDoMainJob 不走 DrvTsGetAdcData，触摸栈空转。直接返回 1。
+     */
+    if (((u32)address & ~1u) == 0x30f34au)
+    {
+        tmp1 = 1;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp2);
+        uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
+    }
+
     switch (address)
     {
     /*

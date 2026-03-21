@@ -12,28 +12,49 @@ u32 isInitTouch;
 #define MTK_TP_REG_Y      0x3400C1C8u
 
 /*
- * MMI 内部 RAM 触摸全局量（IDA：_gtTouchScreenSusbribeData 0xd09198、byte_D0919A、gReEnableTouchScreenFlag）
- * 链接基址按 0x0D000000 + 偏移，与 uc_mem_map_ptr(0x0d000000, ...) 一致。
- * - byte_D0919A：非 0 才走 MdlTouchScreenStatusReport
- * - gReEnableTouchScreenFlag：为 0 时 _MdlTouchscreenRepeatADCProcess 走失败/诊断分支（日志里 0x18000918/0x8000918）
+ * IDA MCP：段名 XRAM @0x00D00000，_gtTouchScreenSusbribeData 线性地址 0xD09198（即 0x00D09198）。
+ * 不是 0x0D000000+0x9198（那是 218MB 带，与 scatter 无关）。
  */
-#define MMI_TOUCH_GT_MAIL_U16   0x0D009198u
-#define MMI_TOUCH_REPORT_EN_U8  0x0D00919Au
-#define MMI_TOUCH_REENABLE_U8   0x0D00919Cu
+static const u32 MMI_TOUCH_MAIL_BASES[] = {
+    0xD09198u,
+};
 
 static void moral_touch_mmi_ram_patch(void)
 {
     u8 one = 1;
-    u16 mbox;
+    u8 ts_mode = 1;
+    u32 zero32 = 0;
+    u32 poll_ok = 60u;
+    unsigned bi;
 
     if (MTK == NULL)
         return;
-    uc_mem_write(MTK, MMI_TOUCH_REPORT_EN_U8, &one, 1);
-    uc_mem_write(MTK, MMI_TOUCH_REENABLE_U8, &one, 1);
-    if (uc_mem_read(MTK, MMI_TOUCH_GT_MAIL_U16, &mbox, 2) == UC_ERR_OK && mbox == 255u)
+    for (bi = 0; bi < sizeof MMI_TOUCH_MAIL_BASES / sizeof MMI_TOUCH_MAIL_BASES[0]; bi++)
     {
-        u16 z = 0;
-        uc_mem_write(MTK, MMI_TOUCH_GT_MAIL_U16, &z, 2);
+        u32 base = MMI_TOUCH_MAIL_BASES[bi];
+        u16 mbox;
+        u32 poll;
+        /* +2 byte_D0919A，+4 gReEnableTouchScreenFlag（相对邮箱半字） */
+        if (uc_mem_write(MTK, base + 2u, &one, 1) != UC_ERR_OK)
+            continue;
+        uc_mem_write(MTK, base + 4u, &one, 1);
+        if (uc_mem_read(MTK, base, &mbox, 2) == UC_ERR_OK && mbox == 255u)
+        {
+            u16 z = 0;
+            uc_mem_write(MTK, base, &z, 2);
+        }
+        /*
+         * _gnTsPrMode @ 0xd09156 = base - 0x42：DoMainJob 需 LCD 开或 gnTsPrMode==1 才走触摸 ADC
+         * _gnTouchScreenPressCount @ 0xd09164 = base - 0x34：过大时 LABEL_27 直接 return，永不 MsSend
+         * _gnPollingTime @ 0xd09194 = base - 4：为 0 或未初始化除法会崩；过大时 (T+599)/T==1 一次上报后即被屏蔽
+         */
+        uc_mem_write(MTK, base - 0x42u, &ts_mode, 1);
+        uc_mem_write(MTK, base - 0x34u, &zero32, 4);
+        if (uc_mem_read(MTK, base - 4u, &poll, 4) == UC_ERR_OK && (poll == 0u || poll > 5000u))
+            uc_mem_write(MTK, base - 4u, &poll_ok, 4);
+        /* 按压时清释放计数，避免卡在释放状态机 */
+        if (isTouchDown)
+            uc_mem_write(MTK, base - 0x0cu, &zero32, 4);
     }
 }
 

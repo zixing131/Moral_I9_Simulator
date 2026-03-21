@@ -7,6 +7,18 @@ static u8  touch_adc_pending = 0;
 static u32 touch_adc_x = 0;
 static u32 touch_adc_y = 0;
 
+void moral_vm_touch_adc_request(u32 x, u32 y)
+{
+    if (isTouchDown)
+    {
+        touch_adc_pending = 1;
+        touch_adc_x = x;
+        touch_adc_y = y;
+    }
+    else
+        touch_adc_pending = 0;
+}
+
 u32 keyRowIdx = 0;
 u32 keyColIdx = 0;
 vm_event *firstEvent;
