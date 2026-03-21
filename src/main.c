@@ -1257,6 +1257,20 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     }
 
     /*
+     * DrvLcdCheckPowerStatus @0xcd44（Thumb）：读 bLCDisOn (0xD007F8)。
+     * bLCDisOn 在 BSS 段默认为 0，DispUpdateScreenMdl 据此判「关屏」跳过
+     * DrvLcdUpdate → HalDispForceUpdate → DE trigger 0x7400313C 永不触发。
+     * 强制返回 1（LCD 已开），使触摸后的 UI 刷新走 DrvLcdUpdate 路径。
+     */
+    if (((u32)address & ~1u) == 0xcd44u)
+    {
+        tmp1 = 1;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp2);
+        uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
+    }
+
+    /*
      * 绕过固件触摸屏校准转换，直接返回 SDL 屏幕坐标。
      * 固件校准公式依赖 NVRAM 中的校准数据（X/Y offset+scale），在模拟器中
      * 这些值可能为零或与模拟器的 ADC 映射不匹配，导致坐标全部错误。

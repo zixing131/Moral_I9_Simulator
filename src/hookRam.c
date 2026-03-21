@@ -457,6 +457,47 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
         }
         break;
+    case 0x74003140: // HalDispSWFMarkTrigger (FMark)
+        if (type == UC_MEM_WRITE && value == 1)
+        {
+            u32 srcBuf = Lcd_Buffer_Ptr;
+            u32 pitch  = Lcd_Update_Pitch;
+            u16 w = (u16)Lcd_Update_W;
+            u16 h = (u16)Lcd_Update_H;
+
+            if (w == 0 || h == 0 || srcBuf < 0x1000u || srcBuf >= 0x8000000u)
+            {
+                EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
+                break;
+            }
+            if (w > DE_PANEL_W)
+                w = (u16)DE_PANEL_W;
+            if (h > DE_PANEL_H)
+                h = (u16)DE_PANEL_H;
+            if (pitch == 0u)
+                pitch = (u32)w * DE_BPP;
+
+            static u32 fmark_trigger_cnt = 0;
+            fmark_trigger_cnt++;
+            if (fmark_trigger_cnt <= 5 || (fmark_trigger_cnt % 100) == 0)
+            {
+                printf("[FMark-trigger] #%u buf=0x%x pitch=%u w=%u h=%u\n",
+                    fmark_trigger_cnt, srcBuf, pitch, w, h);
+            }
+
+            if (de_read_fb(srcBuf, pitch, w, h) == 0)
+            {
+                de_blit_to_sdl((u16)Lcd_Update_X, (u16)Lcd_Update_Y, w, h, (u32)w * DE_BPP);
+                Lcd_Need_Update = 1;
+                if (w >= DE_PANEL_W && h >= DE_PANEL_H)
+                {
+                    Lcd_FullScreen_Ptr = srcBuf;
+                    De_PeriodicRefreshAllowed = 1;
+                }
+            }
+            EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
+        }
+        break;
     case 0x740031A0: // HalDispSetCmdPhase
         if (type == UC_MEM_READ)
         {

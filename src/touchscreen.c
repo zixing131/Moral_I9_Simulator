@@ -62,6 +62,12 @@ static void moral_touch_mmi_ram_patch(void)
 
     moral_touch_calibration_patch();
 
+    /*
+     * bLCDisOn @ 0xD007F8: DispUpdateScreenMdl 通过 DrvLcdCheckPowerStatus
+     * 检查此变量，为 0 则跳过 DrvLcdUpdate，导致触摸后 DE trigger 不触发。
+     */
+    uc_mem_write(MTK, 0xD007F8u, &one, 1);
+
     for (bi = 0; bi < sizeof MMI_TOUCH_MAIL_BASES / sizeof MMI_TOUCH_MAIL_BASES[0]; bi++)
     {
         u32 base = MMI_TOUCH_MAIL_BASES[bi];
