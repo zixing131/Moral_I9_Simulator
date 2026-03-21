@@ -414,7 +414,10 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 de_blit_to_sdl((u16)Lcd_Update_X, (u16)Lcd_Update_Y, w, h, (u32)w * DE_BPP);
                 Lcd_Need_Update = 1;
                 if (w >= DE_PANEL_W && h >= DE_PANEL_H)
+                {
                     Lcd_FullScreen_Ptr = srcBuf;
+                    De_PeriodicRefreshAllowed = 1;
+                }
             }
             EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
         }
