@@ -1,10 +1,13 @@
+#ifndef TOUCHSCREEN_H
+#define TOUCHSCREEN_H
+
 #include "main.h"
 #include "vmEvent.h"
 
-u32 isTouchDown;
-u32 touchX;
-u32 touchY;
-u32 isInitTouch;
+extern u32 isTouchDown;
+extern u32 touchX;
+extern u32 touchY;
+extern u32 isInitTouch;
 
 
 #define TS_CMD_ADDR_Y 0x0010
@@ -24,3 +27,5 @@ u32 isInitTouch;
 void mtk_touch_regs_sync(void);
 /** MEM_READ 钩子：读触摸相关寄存器前刷新，避免仅依赖中断时无坐标 */
 void mtk_touch_hook_mem_read(uint64_t address);
+
+#endif /* TOUCHSCREEN_H */

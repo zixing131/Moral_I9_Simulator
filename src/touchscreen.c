@@ -1,5 +1,10 @@
 #include "touchscreen.h"
 
+u32 isTouchDown;
+u32 touchX;
+u32 touchY;
+u32 isInitTouch;
+
 /* 与 vmEvent.c 中触摸中断写入保持一致，便于固件轮询 0x3400C1xx */
 #define MTK_TP_REG_STATUS 0x3400C1BCu
 #define MTK_TP_REG_UNK    0x3400C1C4u

@@ -368,7 +368,7 @@ void mouseEvent(int type, int x, int y)
 
     mtk_touch_regs_sync();
 
-    EnqueueVMEvent(VM_EVENT_TOUCH_SCREEN_IRQ, type, 0);
+    EnqueueVMEvent(VM_EVENT_TOUCH_SCREEN_IRQ, type, (x << 16) | y);
     if (type == MR_MOUSE_DOWN || type == MR_MOUSE_MOVE)
         EnqueueVMEvent(VM_EVENT_TOUCH_SCREEN_IRQ, 3, (x << 16) | y);
 }

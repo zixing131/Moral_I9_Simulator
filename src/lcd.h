@@ -1,3 +1,6 @@
+#ifndef LCD_H
+#define LCD_H
+
 #include "main.h"
 #include "vmEvent.h"
 
@@ -7,6 +10,7 @@
 void de_emulator_periodic_refresh(void);
 
 void handleLcdReg(uint64_t address, u32 data, uint64_t value);
+void compositeLayers(void);
 
 typedef struct _lcdLayer
 {
@@ -49,3 +53,5 @@ bool LCD_Initialized = false;
 // 最多四层
 lcdLayer lcdLayerList[4];
 lcdRegionOfInterest lcdRegionOfInterest_st;
+
+#endif /* LCD_H */

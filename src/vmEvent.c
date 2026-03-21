@@ -1,4 +1,5 @@
 #include "vmEvent.h"
+#include "touchscreen.h"
 #define MAX_VM_EVENT_COUNT 512
 #define MAX_VM_EVENT_WAIT_COUNT 512
 
@@ -157,7 +158,9 @@ inline void handleVmEvent_EMU(uint64_t address)
                 break;
             case VM_EVENT_TOUCH_SCREEN_IRQ:
                 if (vmEvent->r0 != 3)
-                { // detect中断
+                { // detect中断 (IRQ 31 = HalTSPenDetIrqHandler)
+                    IRQ_MASK_SET_L_Data |= (1u << 29);  // 确保 ADC 中断 mask 就绪
+
                     if (StartInterrupt(31, address))
                     {
                         printf("handle touch down/up:%d\n", vmEvent->r0);
@@ -165,24 +168,41 @@ inline void handleVmEvent_EMU(uint64_t address)
                         uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
                         tmp = 1;
                         uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+
+                        /* 在 detect ISR 里就把坐标写好，防止 ADC 中断被延迟 */
+                        {
+                            u32 rawX = (vmEvent->r1 >> 16) & 0xffff;
+                            u32 rawY = vmEvent->r1 & 0xffff;
+                            if (rawX == 0 && rawY == 0)
+                            {
+                                rawX = touchX;
+                                rawY = touchY;
+                            }
+                            tmp = rawY * 1023 / 400;
+                            uc_mem_write(MTK, 0x3400C1C8, &tmp, 4);
+                            tmp = rawX * 1023 / 240;
+                            uc_mem_write(MTK, 0x3400C1C0, &tmp, 4);
+                        }
                     }
                     else
                         EnqueueVMEvent(vmEvent->event, vmEvent->r0, vmEvent->r1);
                 }
                 else
-                { // adc采样中断
-                    if (StartInterrupt(29, address))
-                    {
-                        u32 rawY = vmEvent->r1 & 0xffff;
-                        u32 rawX = (vmEvent->r1 >> 16) & 0xffff;
-                        tmp = rawY * 1023 / 400;
-                        uc_mem_write(MTK, 0x3400C1C8, &tmp, 4);
-                        tmp = rawX * 1023 / 240;
-                        uc_mem_write(MTK, 0x3400C1C0, &tmp, 4);
-                        tmp = 2;
-                        uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
-                    }
-                    else
+                { // adc采样中断 (IRQ 29 = HalTSAdcDoneIrqHandler)
+                    if (!isTouchDown)
+                        break;  // 已松手则丢弃，避免过时事件堵塞队列
+
+                    u32 rawY = vmEvent->r1 & 0xffff;
+                    u32 rawX = (vmEvent->r1 >> 16) & 0xffff;
+                    tmp = rawY * 1023 / 400;
+                    uc_mem_write(MTK, 0x3400C1C8, &tmp, 4);
+                    tmp = rawX * 1023 / 240;
+                    uc_mem_write(MTK, 0x3400C1C0, &tmp, 4);
+                    tmp = 2;
+                    uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+
+                    IRQ_MASK_SET_L_Data |= (1u << 29);
+                    if (!StartInterrupt(29, address))
                         EnqueueVMEvent(vmEvent->event, vmEvent->r0, vmEvent->r1);
                 }
 
