@@ -62,14 +62,20 @@ static u32 auxadc_get_result(void)
     case 0xB81: /* Y 坐标通道 */
         result = (touchY < 400u ? touchY : 399u) * 1023u / 400u;
         break;
-    case 0x781: /* Z1 压力通道 — 返回 0 触发 MdlTouchscreenGetADCData 旁路 */
-        result = isTouchDown ? 0u : 1023u;
+    case 0x781: /* Z1 压力通道 */
+        result = isTouchDown ? 200u : 1023u;
         break;
-    case 0x7B1: /* Z2 压力通道 — 与 Z1=0 配合触发旁路路径 */
-        result = isTouchDown ? 1023u : 0u;
+    case 0x7B1: /* Z2 压力通道 */
+        result = isTouchDown ? 600u : 1023u;
         break;
-    default: /* 电阻测量等其他通道 */
-        result = isTouchDown ? 0u : 1023u;
+    case 0x181: /* X 电阻测量通道 (gnXResistance) */
+        result = isTouchDown ? 300u : 0u;
+        break;
+    case 0x191: /* Y 电阻测量通道 (gYResistance) */
+        result = isTouchDown ? 300u : 0u;
+        break;
+    default:
+        result = isTouchDown ? 300u : 0u;
         break;
     }
     if (auxadc_log_count < 30)
@@ -331,6 +337,8 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             if (Lcd_Update_W >= DE_PANEL_W && Lcd_Update_H >= DE_PANEL_H &&
                 Lcd_Buffer_Ptr >= 0x1000u && Lcd_Buffer_Ptr < 0x8000000u)
             {
+                if (Lcd_FullScreen_Ptr != 0 && Lcd_FullScreen_Ptr != Lcd_Buffer_Ptr)
+                    De_PeriodicRefreshAllowed = 1;
                 Lcd_FullScreen_Ptr = Lcd_Buffer_Ptr;
             }
         }
@@ -405,7 +413,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             {
                 de_blit_to_sdl((u16)Lcd_Update_X, (u16)Lcd_Update_Y, w, h, (u32)w * DE_BPP);
                 Lcd_Need_Update = 1;
-                De_PeriodicRefreshAllowed = 1;
                 if (w >= DE_PANEL_W && h >= DE_PANEL_H)
                     Lcd_FullScreen_Ptr = srcBuf;
             }
