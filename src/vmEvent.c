@@ -134,7 +134,10 @@ inline void handleVmEvent_EMU(uint64_t address)
                 uc_mem_write(MTK, 0x3400C1C0, &tmp, 4);
                 tmp = isTouchDown ? 2 : 0;
                 uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
-                printf("handle touch adc: x=%d y=%d\n", touch_adc_x, touch_adc_y);
+                static u32 adc_log_cnt = 0;
+                adc_log_cnt++;
+                if (adc_log_cnt <= 10 || (adc_log_cnt % 200) == 0)
+                    printf("handle touch adc: x=%d y=%d\n", touch_adc_x, touch_adc_y);
                 touch_adc_pending = 0;
             }
         }

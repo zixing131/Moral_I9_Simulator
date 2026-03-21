@@ -1451,7 +1451,6 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         uc_reg_read(MTK, UC_ARM_REG_R1, &Lcd_Update_Y);
         uc_reg_read(MTK, UC_ARM_REG_R2, &Lcd_Update_W);
         uc_reg_read(MTK, UC_ARM_REG_R3, &Lcd_Update_H);
-        printf("DrvLcdSetDisplayRange %x %x %x %x\n", Lcd_Update_X, Lcd_Update_Y, Lcd_Update_W, Lcd_Update_H);
         break;
     // case 0x1A6E70:
     //     tmp2 = 1;
@@ -1549,7 +1548,6 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
             while (1)
                 ;
         }
-        // printf("KER_VERROR_DIAGNOSE ");
         break;
     // case 0x12E92:
     //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
@@ -1650,24 +1648,25 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
 
         break;
     case 0x2d5eca:
-        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-        uc_mem_read(MTK, tmp1, globalSprintfBuff, 128);
-        if (strstr(globalSprintfBuff, "%30s") == NULL && strstr(globalSprintfBuff, "%s") == NULL)
+    {
+        static u32 uart_cnt = 0;
+        uart_cnt++;
+        if (uart_cnt <= 20)
         {
-            printf("[uart_print]");
-            printf("%s,%x,%x", globalSprintfBuff, tmp2, tmp3);
-            printf("(%x)\n", lastAddress);
-        }
-        else
-        {
-            uc_mem_read(MTK, tmp2, sprintfBuff, 128);
-            printf("[uart_print]");
-            printf("%s,%x,%x", globalSprintfBuff, sprintfBuff);
-            printf("\n");
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            uc_mem_read(MTK, tmp1, globalSprintfBuff, 128);
+            if (strstr(globalSprintfBuff, "%30s") == NULL && strstr(globalSprintfBuff, "%s") == NULL)
+                printf("[uart_print]%s,%x,%x(%x)\n", globalSprintfBuff, tmp2, tmp3, lastAddress);
+            else
+            {
+                uc_mem_read(MTK, tmp2, sprintfBuff, 128);
+                printf("[uart_print]%s,%x,%x\n", globalSprintfBuff, sprintfBuff);
+            }
         }
         break;
+    }
     // case 0x28c884:
     // case 0xbe0c:
     //     printf("DrvLcdWriteSingleCmd(%x)\n", lastAddress);
@@ -1683,7 +1682,6 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     case 0x800160C:
     case 0x1C007160:
     case 0x3B5C54:
-        //    case 0x3B5BA4:
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         if ((tmp1 & 0x110000) != 0)
         {
@@ -1691,20 +1689,22 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
             while (1)
                 ;
         }
-        if (tmp1 == 0xc34 || tmp1 == 0x10034 || tmp1 == 0x34)
         {
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
-            uc_mem_read(MTK, tmp1, globalSprintfBuff, 128);
-            printf("[KER_VER]");
-            printf("%s,%x,%x", globalSprintfBuff, tmp2, tmp3);
-            printf("(call:%x)\n", lastAddress);
+            static u32 kerr_cnt = 0;
+            kerr_cnt++;
+            if (kerr_cnt <= 30)
+            {
+                if (tmp1 == 0xc34 || tmp1 == 0x10034 || tmp1 == 0x34)
+                {
+                    uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
+                    uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
+                    uc_mem_read(MTK, tmp1, globalSprintfBuff, 128);
+                    printf("[KER_VER]%s,%x,%x(call:%x)\n", globalSprintfBuff, tmp2, tmp3, lastAddress);
+                }
+                else
+                    printf("KER_VERROR_DIAGNOSE R0:%x (%x)\n", tmp1, lastAddress);
+            }
         }
-        else
-        {
-            printf("KER_VERROR_DIAGNOSE R0:%x (%x)\n", tmp1, lastAddress);
-        }
-
         break;
     // case 0x13C38: // HalClkgenBbtopSetClkSpeed强制返回0
     //     tmp1 = 0;

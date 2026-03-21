@@ -762,7 +762,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         {
             LCD_CMD_Data &= 0xffff;
             LCD_CMD_Data |= (value << 16);
-            printf("Handle LCD Cmd %x \n", LCD_CMD_Data);
         }
         break;
     case 0x74003130: // 读取cmd响应
