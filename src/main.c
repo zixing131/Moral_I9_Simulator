@@ -750,7 +750,37 @@ void initMtkSimalator()
         }
         printf("[mem] Mapped 0x81000000..0x83000000 (RTC / AUX / GPT / legacy IRQ regs)\n");
     }
-    err = uc_hook_add(MTK, &trace[0], UC_HOOK_CODE, hookCodeCallBack, 0, 0, 0xefffffff);
+    /* 只对需要 hook 的地址范围注册 UC_HOOK_CODE，避免每条指令都调用回调 */
+    {
+        static uc_hook code_hooks[32];
+        int hi = 0;
+        static const u32 hook_ranges[][2] = {
+            {0xA144,    0xCD44},     /* cluster: pin config, LCD params */
+            {0x1E574,   0x1E575},    /* HalDispTransAddr */
+            {0x2AE1C,   0x2CB28},    /* ker_assert, DMA2D funcs */
+            {0x2D5ECA,  0x2D5ECB},   /* uart_print */
+            {0x31B9C,   0x31B9D},    /* RTC seconds hook */
+            {0x1A605C,  0x1A605D},   /* ker_assert_func */
+            {0x1D4B96,  0x1D4B97},   /* nand_translate_DMA */
+            {0x1ED480,  0x1ED481},   /* _RtkExceptionRoutine */
+            {0x1FE99C,  0x1FE99D},   /* LOG_SD */
+            {0x219712,  0x219DF0},   /* touch MsSend return points */
+            {0x30F34A,  0x30F34B},   /* dev_accGetLCDStatus */
+            {0x32DFA4,  0x32DFA5},   /* _RtkAssertRoutine */
+            {0x34D236,  0x34D237},   /* MsSend POP */
+            {0x36ED44,  0x36ED45},   /* fatal error check */
+            {0x3B5A00,  0x3B5C54},   /* KER trace/error cluster */
+            {0x7C322C,  0x7C3238},   /* skip mrc instructions */
+            {0x800160C, 0x800160D},  /* KER error high addr */
+            {0x1C007160,0x1C007161}, /* KER error high addr */
+        };
+        for (u32 ri = 0; ri < sizeof(hook_ranges)/sizeof(hook_ranges[0]); ri++)
+        {
+            err = uc_hook_add(MTK, &code_hooks[hi++], UC_HOOK_CODE,
+                              hookCodeCallBack, 0,
+                              hook_ranges[ri][0], hook_ranges[ri][1]);
+        }
+    }
 
     err = uc_hook_add(MTK, &trace[4], UC_HOOK_BLOCK, hookBlockCallBack, 0, 0, 0xefffffff);
 
@@ -1150,41 +1180,8 @@ void hookBlockCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *use
 void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
     u32 tmp1, tmp2, tmp3, tmp4;
-    u32 addr32 = (u32)address & ~1u;
 
-    /*
-     * Fast path: skip addresses that don't match any hook.
-     * Hook addresses sorted numerically:
-     *   0xA144, 0xC166, 0xCD44,  | cluster 1
-     *   0x1E574,                  | isolated
-     *   0x2AE1C, 0x2C55E..2CB28, | cluster 3
-     *   0x31B9C,                  | isolated
-     *   0x1A605C..0x219DF0,       | cluster 5 (6 hooks)
-     *   0x2D5ECA..0x3B5C54,       | cluster 6 (9 hooks)
-     *   0x7C322C, 0x7C3238,       | cluster 7
-     *   0x800160C, 0x1C007160     | high addresses
-     */
-    if (addr32 > 0x31B9Cu  && addr32 < 0x1A605Cu)  goto fast_end;
-    if (addr32 < 0xA144u)                           goto fast_end;
-    if (addr32 > 0xCD44u   && addr32 < 0x1E574u)   goto fast_end;
-    if (addr32 > 0x1E574u  && addr32 < 0x2AE1Cu)   goto fast_end;
-    if (addr32 > 0x2CB28u  && addr32 < 0x31B9Cu)   goto fast_end;
-    if (addr32 > 0x3B5C54u && addr32 < 0x7C322Cu)  goto fast_end;
-    if (addr32 > 0x219DF0u && addr32 < 0x2D5ECAu)  goto fast_end;
-    if (addr32 > 0x1A605Cu && addr32 < 0x1D4B96u)  goto fast_end;
-    if (addr32 > 0x1D4B96u && addr32 < 0x1ED480u)  goto fast_end;
-    if (addr32 > 0x1ED480u && addr32 < 0x1FE99Cu)  goto fast_end;
-    if (addr32 > 0x1FE99Cu && addr32 < 0x219712u)  goto fast_end;
-    if (addr32 > 0x2D5ECAu && addr32 < 0x30F34Au)  goto fast_end;
-    if (addr32 > 0x30F34Au && addr32 < 0x32DFA4u)  goto fast_end;
-    if (addr32 > 0x32DFA4u && addr32 < 0x34D236u)  goto fast_end;
-    if (addr32 > 0x34D236u && addr32 < 0x36ED44u)  goto fast_end;
-    if (addr32 > 0x36ED44u && addr32 < 0x3B5A01u)  goto fast_end;
-    if (addr32 > 0x7C3238u && addr32 < 0x800160Cu) goto fast_end;
-    if (addr32 > 0x800160Cu && addr32 < 0x1C007160u) goto fast_end;
-    if (addr32 > 0x1C007160u)                       goto fast_end;
-
-    if (addr32 == 0x31b9c)
+    if (((u32)address & ~1u) == 0x31b9c)
     {
         static u32 cached_rtc = 0;
         static clock_t last_rtc_time = 0;
@@ -1659,7 +1656,6 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         uc_reg_write(MTK, UC_ARM_REG_PC, &address);
         break;
     }
-fast_end:
     lastAddress = address;
 }
 
