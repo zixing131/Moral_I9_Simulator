@@ -53,12 +53,16 @@ static u32 auxadc_get_result(void)
     u32 cmd12 = auxadc_last_cmd & 0xFFF;
     switch (cmd12)
     {
-    case 0x711:
+    case 0x711: /* X 坐标通道 */
         return (touchX < 240u ? touchX : 239u) * 1023u / 240u;
-    case 0xB81:
+    case 0xB81: /* Y 坐标通道 */
         return (touchY < 400u ? touchY : 399u) * 1023u / 400u;
-    default:
-        return isTouchDown ? 32u : 64u;
+    case 0x781: /* Z1 压力通道 — 返回 0 触发 MdlTouchscreenGetADCData 旁路 */
+        return isTouchDown ? 0u : 1023u;
+    case 0x7B1: /* Z2 压力通道 — 与 Z1=0 配合触发旁路路径 */
+        return isTouchDown ? 1023u : 0u;
+    default: /* 电阻测量等其他通道 */
+        return isTouchDown ? 0u : 1023u;
     }
 }
 
@@ -70,11 +74,20 @@ static u32 auxadc_get_result(void)
  * 简单直接：从 Lcd_Buffer_Ptr 按 Lcd_Update_Pitch（字节行距）整块或逐行读到 Lcd_Cache_Buffer，
  * 然后 blit 到 SDL。不再试图解析 DE Layer0 描述符（此固件下始终返回垃圾值）。
  */
+static u8 de_blit_logged = 0;
+
 static void de_blit_to_sdl(u16 dstX, u16 dstY, u16 w, u16 h, u32 cachePitch)
 {
     SDL_Surface *sfc = SDL_GetWindowSurface(window);
     if (!sfc)
         return;
+
+    if (!de_blit_logged)
+    {
+        de_blit_logged = 1;
+        printf("[SDL-surface] w=%d h=%d pitch=%d bpp=%d Rmask=0x%x\n",
+               sfc->w, sfc->h, sfc->pitch, sfc->format->BytesPerPixel, sfc->format->Rmask);
+    }
 
     for (u16 yi = 0; yi < h && (dstY + yi) < DE_PANEL_H; yi++)
     {
@@ -298,15 +311,21 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     case 0x74003040:
         if (type == UC_MEM_WRITE)
         {
+            u32 old = Lcd_Buffer_Ptr;
             Lcd_Buffer_Ptr &= 0xffff0000;
             Lcd_Buffer_Ptr |= (value & 0xffff);
+            if (Lcd_Buffer_Ptr != old)
+                printf("[DE-buf] ptr changed: 0x%x -> 0x%x\n", old, Lcd_Buffer_Ptr);
         }
         break;
     case 0x74003044:
         if (type == UC_MEM_WRITE)
         {
+            u32 old = Lcd_Buffer_Ptr;
             Lcd_Buffer_Ptr &= 0x0000ffff;
             Lcd_Buffer_Ptr |= ((value & 0xffff) << 16);
+            if (Lcd_Buffer_Ptr != old)
+                printf("[DE-buf] ptr changed: 0x%x -> 0x%x\n", old, Lcd_Buffer_Ptr);
         }
         break;
     case 0x74003054:
