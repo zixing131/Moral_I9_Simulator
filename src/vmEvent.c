@@ -143,7 +143,7 @@ inline void handleVmEvent_EMU(uint64_t address)
         }
     }
 
-    if (handleTick++ > 200)
+    if (handleTick++ > 800)
     {
         handleTick = 0;
         vmEvent = DequeueVMEvent();
