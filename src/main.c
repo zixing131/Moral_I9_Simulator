@@ -1280,6 +1280,46 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         uc_reg_write(MTK, UC_ARM_REG_PC, &tmp3);
     }
 
+    /* MdlVkeyParser @0x21bbe: 解析原始按键事件并生成虚拟按键 */
+    if (((u32)address & ~1u) == 0x21bbeu)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        if (tmp1 >= 0x1000u && tmp1 < 0xF0000000u)
+        {
+            u8 msg[16];
+            if (uc_mem_read(MTK, tmp1, msg, sizeof msg) == UC_ERR_OK)
+            {
+                static u8 parser_log = 0;
+                if (parser_log < 20)
+                {
+                    parser_log++;
+                    printf("[VKEY-PARSER] MdlVkeyParser: mbox=%u type=%u row0=%u col0=%u nrow=%u ncol=%u\n",
+                           msg[0], msg[8], msg[9], msg[11], msg[13], msg[14]);
+                }
+            }
+        }
+    }
+
+    /* MdlVkeySendMsg @0x21b58: 发送虚拟按键到 MMI。byte[8]=press/release, byte[9]=vkey code */
+    if (((u32)address & ~1u) == 0x21b58u)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        if (tmp1 >= 0x1000u && tmp1 < 0xF0000000u)
+        {
+            u8 msg[12];
+            if (uc_mem_read(MTK, tmp1, msg, sizeof msg) == UC_ERR_OK)
+            {
+                static u8 vkey_log = 0;
+                if (vkey_log < 30)
+                {
+                    vkey_log++;
+                    printf("[VKEY] MdlVkeySendMsg: mbox=%u press=%u vkey=%u\n",
+                           msg[0], msg[8], msg[9]);
+                }
+            }
+        }
+    }
+
     if (((u32)address & ~1u) == 0x1ecfcu)
     {
         static u32 swfmark_entry_cnt = 0;

@@ -179,6 +179,8 @@ u8 Lcd_Periodic_Buffer[240 * 400 * 4];
 u8 Lcd_Need_Update = 0;
 /** 由 0x7400313C 首次成功刷屏后置 1；此前禁止周期性显存拉取，避免开机动画/未就绪缓冲花屏 */
 u8 De_PeriodicRefreshAllowed;
+/** DE trigger 触发时记录时间，周期性刷新在近期有 DE 活动时跳过，避免覆盖新渲染的内容 */
+clock_t De_LastTriggerTime;
 
 u32 DE_Layer0_Ptr;
 u32 DE_Layer0_W;
