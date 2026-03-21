@@ -67,6 +67,8 @@ int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
                 evt->event = event;
                 evt->r0 = r0;
                 evt->r1 = r1;
+                if (event == VM_EVENT_TOUCH_SCREEN_IRQ)
+                    touch_irq_pending = 1;
             }
             else
                 printf("WARNING:Max VmEventWaitCount\n");
@@ -201,7 +203,7 @@ inline void handleVmEvent_EMU(uint64_t address)
         }
     }
 
-    if (handleTick++ > 1000)
+    if (handleTick++ > 500)
     {
         handleTick = 0;
         vmEvent = DequeueVMEvent();
@@ -230,17 +232,13 @@ inline void handleVmEvent_EMU(uint64_t address)
                 handleKeyPadVmEvent(vmEvent, address);
                 break;
             case VM_EVENT_LCD_IRQ:
-                // 位于高32位中断
                 if (StartInterrupt(19 + 32, address))
                 {
                     tmp = 0xf << 8;
                     uc_mem_write(MTK, 0x74003148, &tmp, 4);
                     tmp = (1 << 3) | 1;
                     uc_mem_write(MTK, 0x7400314C, &tmp, 4);
-                    EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
                 }
-                else
-                    EnqueueVMEvent(vmEvent->event, vmEvent->r0, vmEvent->r1);
                 break;
             case VM_EVENT_DMA_IRQ:
                 // 位于高32位中断

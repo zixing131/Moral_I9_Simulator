@@ -35,6 +35,7 @@ u32 nandFlashCMD = 0;
 u32 nandFlashRow = 0;
 
 u32 nandFlashCmdIdx = 0;
+static u8 nand_op_pending = 0;
 u16 nandFlashCMDData[32];
 
 u32 nandFlashSectorSize = 0;
@@ -697,9 +698,13 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     case 0x34002C10: // reset watch dog
         if (type == UC_MEM_WRITE)
         {
-            if (value == 0x11FFF || value == 0x10FFF) // HalFcieWaitMieEvent的逻辑
+            if (value == 0x11FFF || value == 0x10FFF)
             {
-                FICE_Status = 0x02000200;
+                if (nand_op_pending)
+                {
+                    FICE_Status = 0x02000200;
+                    nand_op_pending = 0;
+                }
             }
         }
         break;
@@ -842,6 +847,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         {
             if ((value & 1) == 1)
             {
+                nand_op_pending = 1;
                 // FICE_Status = 512 | 513; // 完成标志
                 u16 SectorInPage = nandFlashCMDData[0];
                 u32 PhyRowIdx = (nandFlashCMDData[1] | (nandFlashCMDData[2] << 16));
