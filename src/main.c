@@ -783,8 +783,28 @@ void initMtkSimalator()
 
     err = uc_hook_add(MTK, &trace[4], UC_HOOK_BLOCK, hookBlockCallBack, 0, 0, 0xefffffff);
 
-    err = uc_hook_add(MTK, &trace[2], UC_HOOK_MEM_READ, hookRamCallBack, 0, 0, 0xffffffff);
-    err = uc_hook_add(MTK, &trace[3], UC_HOOK_MEM_WRITE, hookRamCallBack, 1, 0, 0xffffffff);
+    /* 只对 IO 寄存器范围注册 MEM hook，避免每次普通 RAM 读写都调用回调 */
+    {
+        static uc_hook mem_hooks[16];
+        int mi = 0;
+        static const u32 mem_ranges[][2] = {
+            {0x34000000, 0x3400FFFF},  /* MTK 外设寄存器 (IRQ/Timer/UART/AUXADC) */
+            {0x74000000, 0x74006FFF},  /* DE/DMA/FCIE/SPI */
+            {0x81060000, 0x810600FF},  /* GPT */
+            {0x82050000, 0x82050FFF},  /* AUX 触摸 */
+            {0x90000000, 0x90000FFF},  /* LCD 控制器 */
+            {0x00D00000, 0x00D0FFFF},  /* XRAM 全局量 (RF config) */
+        };
+        for (u32 ri = 0; ri < sizeof(mem_ranges)/sizeof(mem_ranges[0]); ri++)
+        {
+            uc_hook_add(MTK, &mem_hooks[mi++], UC_HOOK_MEM_READ,
+                        hookRamCallBack, 0,
+                        mem_ranges[ri][0], mem_ranges[ri][1]);
+            uc_hook_add(MTK, &mem_hooks[mi++], UC_HOOK_MEM_WRITE,
+                        hookRamCallBack, 1,
+                        mem_ranges[ri][0], mem_ranges[ri][1]);
+        }
+    }
 
     err = uc_hook_add(MTK, &trace, UC_HOOK_MEM_READ_UNMAPPED, hookRamErrorBack, 2, 0, 0xFFFFFFFF);
     err = uc_hook_add(MTK, &trace, UC_HOOK_MEM_WRITE_UNMAPPED, hookRamErrorBack, 3, 0, 0xFFFFFFFF);
