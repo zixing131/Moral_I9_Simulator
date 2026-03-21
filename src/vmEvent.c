@@ -3,6 +3,10 @@
 #define MAX_VM_EVENT_COUNT 512
 #define MAX_VM_EVENT_WAIT_COUNT 512
 
+static u8  touch_adc_pending = 0;
+static u32 touch_adc_x = 0;
+static u32 touch_adc_y = 0;
+
 u32 keyRowIdx = 0;
 u32 keyColIdx = 0;
 vm_event *firstEvent;
@@ -105,6 +109,29 @@ uint64_t handleTick;
 inline void handleVmEvent_EMU(uint64_t address)
 {
     u32 tmp;
+
+    /* 延迟 ADC 轮询：每个基本块都检查，在 detect ISR 返回（中断重新使能）后立刻触发 IRQ 29 */
+    if (touch_adc_pending && isTouchDown)
+    {
+        u32 cpsr_val;
+        uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_val);
+        if (!isIRQ_Disable(cpsr_val))
+        {
+            IRQ_MASK_SET_L_Data |= (1u << 29);
+            if (StartInterrupt(29, address))
+            {
+                tmp = touch_adc_y * 1023 / 400;
+                uc_mem_write(MTK, 0x3400C1C8, &tmp, 4);
+                tmp = touch_adc_x * 1023 / 240;
+                uc_mem_write(MTK, 0x3400C1C0, &tmp, 4);
+                tmp = 2;
+                uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+                printf("handle touch adc: x=%d y=%d\n", touch_adc_x, touch_adc_y);
+                touch_adc_pending = 0;
+            }
+        }
+    }
+
     if (handleTick++ > 1000)
     {
         handleTick = 0; // 防止事件处理过快
@@ -159,8 +186,6 @@ inline void handleVmEvent_EMU(uint64_t address)
             case VM_EVENT_TOUCH_SCREEN_IRQ:
                 if (vmEvent->r0 != 3)
                 { // detect中断 (IRQ 31 = HalTSPenDetIrqHandler)
-                    IRQ_MASK_SET_L_Data |= (1u << 29);  // 确保 ADC 中断 mask 就绪
-
                     if (StartInterrupt(31, address))
                     {
                         printf("handle touch down/up:%d\n", vmEvent->r0);
@@ -169,41 +194,35 @@ inline void handleVmEvent_EMU(uint64_t address)
                         tmp = 1;
                         uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
 
-                        /* 在 detect ISR 里就把坐标写好，防止 ADC 中断被延迟 */
+                        /* 预写坐标到寄存器 */
+                        u32 rawX = (vmEvent->r1 >> 16) & 0xffff;
+                        u32 rawY = vmEvent->r1 & 0xffff;
+                        if (rawX == 0 && rawY == 0)
                         {
-                            u32 rawX = (vmEvent->r1 >> 16) & 0xffff;
-                            u32 rawY = vmEvent->r1 & 0xffff;
-                            if (rawX == 0 && rawY == 0)
-                            {
-                                rawX = touchX;
-                                rawY = touchY;
-                            }
-                            tmp = rawY * 1023 / 400;
-                            uc_mem_write(MTK, 0x3400C1C8, &tmp, 4);
-                            tmp = rawX * 1023 / 240;
-                            uc_mem_write(MTK, 0x3400C1C0, &tmp, 4);
+                            rawX = touchX;
+                            rawY = touchY;
+                        }
+                        tmp = rawY * 1023 / 400;
+                        uc_mem_write(MTK, 0x3400C1C8, &tmp, 4);
+                        tmp = rawX * 1023 / 240;
+                        uc_mem_write(MTK, 0x3400C1C0, &tmp, 4);
+
+                        /* 标记 ADC pending，由顶部轮询在 ISR 返回后触发 IRQ 29 */
+                        if (vmEvent->r0 == 1 || vmEvent->r0 == 4)
+                        {
+                            touch_adc_pending = 1;
+                            touch_adc_x = rawX;
+                            touch_adc_y = rawY;
                         }
                     }
                     else
                         EnqueueVMEvent(vmEvent->event, vmEvent->r0, vmEvent->r1);
                 }
                 else
-                { // adc采样中断 (IRQ 29 = HalTSAdcDoneIrqHandler)
-                    if (!isTouchDown)
-                        break;  // 已松手则丢弃，避免过时事件堵塞队列
-
-                    u32 rawY = vmEvent->r1 & 0xffff;
-                    u32 rawX = (vmEvent->r1 >> 16) & 0xffff;
-                    tmp = rawY * 1023 / 400;
-                    uc_mem_write(MTK, 0x3400C1C8, &tmp, 4);
-                    tmp = rawX * 1023 / 240;
-                    uc_mem_write(MTK, 0x3400C1C0, &tmp, 4);
-                    tmp = 2;
-                    uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
-
-                    IRQ_MASK_SET_L_Data |= (1u << 29);
-                    if (!StartInterrupt(29, address))
-                        EnqueueVMEvent(vmEvent->event, vmEvent->r0, vmEvent->r1);
+                { // 旧路径的 ADC 事件（不再从 mouseEvent 入队，但保留兼容）
+                    touch_adc_pending = 1;
+                    touch_adc_x = (vmEvent->r1 >> 16) & 0xffff;
+                    touch_adc_y = vmEvent->r1 & 0xffff;
                 }
 
                 break;

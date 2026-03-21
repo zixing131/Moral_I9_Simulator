@@ -102,24 +102,6 @@ void de_emulator_periodic_refresh(void)
     if (!De_PeriodicRefreshAllowed || !LCD_Initialized)
         return;
 
-    /* 优先走 GDI compositeLayers（与固件配置的图层偏移一致），只在图层未就绪时才退到 DE 缓冲 */
-    u8 hasGdiLayer = 0;
-    for (int i = 0; i < 4; i++)
-    {
-        if (lcdLayerList[i].enable && lcdLayerList[i].buffer_ptr != 0 &&
-            lcdLayerList[i].width > 0 && lcdLayerList[i].height > 0 && lcdLayerList[i].pitch > 0)
-        {
-            hasGdiLayer = 1;
-            break;
-        }
-    }
-
-    if (hasGdiLayer)
-    {
-        compositeLayers();
-        return;
-    }
-
     u32 srcBuf = Lcd_Buffer_Ptr;
     u32 pitch = Lcd_Update_Pitch;
 
