@@ -61,8 +61,8 @@ void renderGdiBufferToWindow()
 
 void lcdTaskMain()
 {
-    /* 每帧刷触摸寄存器，避免固件仅轮询、不走路径中断时无坐标 */
-    mtk_touch_regs_sync();
+    /* 触摸寄存器由模拟器线程的 touch_adc_pending 和 mtk_touch_hook_mem_read 更新，
+     * 不在此线程调用 uc_mem_write 以避免跨线程锁竞争阻塞 MainUpdateTask 循环 */
 
 #if MORAL_LCD_PERIODIC_REFRESH_MS > 0
     static clock_t last_de_poll = 0;
