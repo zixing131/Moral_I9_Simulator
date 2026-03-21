@@ -1,4 +1,5 @@
 #include "lcd.h"
+#include "touchscreen.h"
 
 void ClearLayer(lcdLayer *ll)
 {
@@ -60,6 +61,9 @@ void renderGdiBufferToWindow()
 
 void lcdTaskMain()
 {
+    /* 每帧刷触摸寄存器，避免固件仅轮询、不走路径中断时无坐标 */
+    mtk_touch_regs_sync();
+
 #if MORAL_LCD_PERIODIC_REFRESH_MS > 0
     static clock_t last_de_poll = 0;
     clock_t threshold = (clock_t)(MORAL_LCD_PERIODIC_REFRESH_MS * CLOCKS_PER_SEC / 1000);
