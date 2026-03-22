@@ -13,6 +13,10 @@ u32 halTimerCnt = 0;              // HalTimerUDelay调用
 u32 halTimerCntMax = 0;           // HalTimerUDelay调用
 u32 DrvTimerStdaTimerGetTick = 0; // DrvTimerStdaTimerGetTick
 
+u8 de_small_pending = 0;
+
+static clock_t cursor_de_last_draw = 0;
+
 u8 SPI_CMD_Buf[256];
 u32 SPI_CMD_Buf_Idx = 0;
 
@@ -556,21 +560,71 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                     de_trigger_cnt, srcBuf, pitch, w, h);
             }
 
-            if (de_read_fb(srcBuf, pitch, w, h) == 0)
+            /*
+             * Tiny-region throttle (e.g. 14×14 touch cursor): on real
+             * hardware the DE DMA + LCD frame sync naturally rate-limit
+             * the cursor redraw loop.  In the emulator the DE completes
+             * instantly and the LCD IRQ triggers the ISR which starts
+             * another draw, creating a tight feedback loop.
+             *
+             * For tiny regions (≤ 20×20) we:
+             *  - set the completion status immediately (no polling delay)
+             *  - throttle the SDL blit to ~30 fps
+             *  - SKIP the LCD IRQ to break the ISR→draw→ISR loop
+             * Larger regions (buttons, panels) get full processing.
+             */
+            u8 is_cursor_de = (w <= 20u && h <= 20u);
+
+            if (is_cursor_de)
             {
-                de_blit_to_sdl((u16)Lcd_Update_X, (u16)Lcd_Update_Y, w, h, (u32)w * DE_BPP);
-                Lcd_Need_Update = 1;
-                if (w >= 100u && h >= 100u)
-                    De_LastTriggerTime = clock();
-                if (w >= (DE_PANEL_W - 20u) && h >= (DE_PANEL_H - 80u))
+                /*
+                 * Simulate real hardware DE DMA latency for tiny regions.
+                 * On real HW the DMA takes ~1 ms; without this delay the
+                 * firmware's cursor-redraw loop spins thousands of times
+                 * per second, starving every other RTOS task.
+                 *
+                 * We sleep until at least 16 ms (~60 fps) have elapsed
+                 * since the last cursor draw.  SDL_Delay yields the
+                 * emulator thread so the main (SDL event) thread keeps
+                 * running; when we wake we set the completion status and
+                 * the firmware proceeds normally.
+                 */
+                clock_t min_interval = (clock_t)(CLOCKS_PER_SEC / 60);
+                if (min_interval < 1) min_interval = 1;
+
+                while (cursor_de_last_draw != 0 &&
+                       (clock() - cursor_de_last_draw) < min_interval)
                 {
-                    Lcd_FullScreen_Ptr = srcBuf;
-                    De_PeriodicRefreshAllowed = 1;
+                    SDL_Delay(1);
                 }
+                cursor_de_last_draw = clock();
+
+                if (de_read_fb(srcBuf, pitch, w, h) == 0)
+                {
+                    de_blit_to_sdl((u16)Lcd_Update_X, (u16)Lcd_Update_Y, w, h, (u32)w * DE_BPP);
+                    Lcd_Need_Update = 1;
+                }
+
+                tmp = 0xF00;
+                uc_mem_write(MTK, 0x74003148u, &tmp, 4);
             }
-            tmp = 0xF00;
-            uc_mem_write(MTK, 0x74003148u, &tmp, 4);
-            EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
+            else
+            {
+                if (de_read_fb(srcBuf, pitch, w, h) == 0)
+                {
+                    de_blit_to_sdl((u16)Lcd_Update_X, (u16)Lcd_Update_Y, w, h, (u32)w * DE_BPP);
+                    Lcd_Need_Update = 1;
+                    De_LastTriggerTime = clock();
+                    if (w >= (DE_PANEL_W - 20u) && h >= (DE_PANEL_H - 80u))
+                    {
+                        Lcd_FullScreen_Ptr = srcBuf;
+                        De_PeriodicRefreshAllowed = 1;
+                    }
+                }
+                tmp = 0xF00;
+                uc_mem_write(MTK, 0x74003148u, &tmp, 4);
+                EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
+            }
         }
         break;
     case 0x74003140: // HalDispSWFMarkTrigger / HalDispReset both write here

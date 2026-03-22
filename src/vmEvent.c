@@ -121,11 +121,26 @@ inline vm_event *DequeueVMEvent()
 
 uint64_t handleTick;
 
+static u8  timer_irq_pending = 0;
+static u32 timer_irq_channel = 14;
+
 inline void handleVmEvent_EMU(uint64_t address)
 {
     u32 tmp;
 
-    /* 触摸 DOWN/UP 事件优先处理，先触发 pen-detect IRQ 31 */
+    /* 重投递上次失败的 Timer IRQ */
+    if (timer_irq_pending)
+    {
+        u32 cpsr_t;
+        uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_t);
+        if (!isIRQ_Disable(cpsr_t))
+        {
+            if (StartInterrupt(timer_irq_channel, address))
+                timer_irq_pending = 0;
+        }
+    }
+
+    /* 触摸 DOWN/UP/MOVE 事件优先处理，先触发 pen-detect IRQ 31 */
     if (pending_touch_active || (touch_irq_pending && VmEventCount > 0 && vmIsLock == 0))
     {
         vm_event tevt;
@@ -150,6 +165,11 @@ inline void handleVmEvent_EMU(uint64_t address)
                     for (j = i; j < VmEventCount; j++)
                         VmEventHandleList[j] = VmEventHandleList[j + 1];
                     have_evt = 1;
+                    for (j = i; j < VmEventCount; j++)
+                    {
+                        if (VmEventHandleList[j].event == VM_EVENT_TOUCH_SCREEN_IRQ)
+                        { touch_irq_pending = 1; break; }
+                    }
                     break;
                 }
             }
@@ -158,47 +178,43 @@ inline void handleVmEvent_EMU(uint64_t address)
 
         if (have_evt)
         {
-            if (tevt.r0 != MR_MOUSE_MOVE)
+            u32 cpsr_chk;
+            uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_chk);
+            if (!isIRQ_Disable(cpsr_chk))
             {
-                u32 cpsr_chk;
-                uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_chk);
-                if (!isIRQ_Disable(cpsr_chk))
+                IRQ_MASK_SET_L_Data |= (1u << 31);
+                if (tevt.r0 == MR_MOUSE_UP)
                 {
-                    IRQ_MASK_SET_L_Data |= (1u << 31);
-                    if (tevt.r0 == MR_MOUSE_UP)
+                    tmp = 0;
+                    uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
+                    uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+                }
+                else
+                {
+                    tmp = 3;
+                    uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
+                    tmp = 1;
+                    uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+                }
+                if (StartInterrupt(31, address))
+                {
+                    u32 rawX = (tevt.r1 >> 16) & 0xffff;
+                    u32 rawY = tevt.r1 & 0xffff;
+                    if (rawX == 0 && rawY == 0)
+                    { rawX = touchX; rawY = touchY; }
+                    touch_adc_pending = 1;
+                    touch_adc_x = rawX;
+                    touch_adc_y = rawY;
+                    pending_touch_active = 0;
+                    if (tevt.r0 == MR_MOUSE_DOWN)
                     {
-                        tmp = 0;
-                        uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
-                        uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+                        moral_touch_on_pen_down();
+                        auxadc_log_count = 0;
+                        mssend_pop_log = 0;
                     }
-                    else
+                    else if (tevt.r0 == MR_MOUSE_MOVE)
                     {
-                        tmp = 3;
-                        uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
-                        tmp = 1;
-                        uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
-                    }
-                    if (StartInterrupt(31, address))
-                    {
-                        u32 rawX = (tevt.r1 >> 16) & 0xffff;
-                        u32 rawY = tevt.r1 & 0xffff;
-                        if (rawX == 0 && rawY == 0)
-                        { rawX = touchX; rawY = touchY; }
-                        touch_adc_pending = 1;
-                        touch_adc_x = rawX;
-                        touch_adc_y = rawY;
-                        pending_touch_active = 0;
-                        if (tevt.r0 == MR_MOUSE_DOWN)
-                        {
-                            moral_touch_on_pen_down();
-                            auxadc_log_count = 0;
-                            mssend_pop_log = 0;
-                        }
-                    }
-                    else
-                    {
-                        pending_touch_evt = tevt;
-                        pending_touch_active = 1;
+                        moral_touch_on_pen_down();
                     }
                 }
                 else
@@ -209,10 +225,8 @@ inline void handleVmEvent_EMU(uint64_t address)
             }
             else
             {
-                touch_adc_pending = 1;
-                touch_adc_x = (tevt.r1 >> 16) & 0xffff;
-                touch_adc_y = tevt.r1 & 0xffff;
-                pending_touch_active = 0;
+                pending_touch_evt = tevt;
+                pending_touch_active = 1;
             }
         }
     }
@@ -254,15 +268,15 @@ inline void handleVmEvent_EMU(uint64_t address)
                 }
                 break;
             case VM_EVENT_Timer_IRQ:
-                // DrvTimerOstickGetCount
-                // TimeoutLength [0x34002C04]
-                // DrvTimerOstickIntFlag [0x34002C28]
                 tmp = 0x20;
                 uc_mem_write(MTK, 0x34002C28, &tmp, 4);
                 uc_mem_read(MTK, 0x34002C04, &halTimerCount, 4);
                 uc_mem_write(MTK, 0x34002C08, &halTimerCount, 4);
                 if (!StartInterrupt(vmEvent->r0, address))
-                    EnqueueVMEvent(VM_EVENT_Timer_IRQ, vmEvent->r0, 0);
+                {
+                    timer_irq_pending = 1;
+                    timer_irq_channel = vmEvent->r0;
+                }
                 break;
             case VM_EVENT_KEYBOARD:
                 handleKeyPadVmEvent(vmEvent, address);

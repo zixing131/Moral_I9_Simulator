@@ -371,8 +371,17 @@ void mouseEvent(int type, int x, int y)
 
     moral_vm_touch_adc_request((u32)x, (u32)y);
 
-    if (type != MR_MOUSE_MOVE)
-        EnqueueVMEvent(VM_EVENT_TOUCH_SCREEN_IRQ, type, (x << 16) | y);
+    if (type == MR_MOUSE_MOVE)
+    {
+        static clock_t last_move_enqueue = 0;
+        clock_t now = clock();
+        clock_t min_iv = (clock_t)(CLOCKS_PER_SEC / 30);
+        if (min_iv < 1) min_iv = 1;
+        if (last_move_enqueue != 0 && (now - last_move_enqueue) < min_iv)
+            return;
+        last_move_enqueue = now;
+    }
+    EnqueueVMEvent(VM_EVENT_TOUCH_SCREEN_IRQ, type, (x << 16) | y);
 }
 
 void loop()

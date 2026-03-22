@@ -144,8 +144,6 @@ void mtk_touch_hook_mem_read(uint64_t address)
 
 void moral_touch_on_pen_down(void)
 {
-    u32 zero32 = 0;
-    u8 one = 1;
     if (MTK == NULL)
         return;
 
@@ -155,35 +153,26 @@ void moral_touch_on_pen_down(void)
         u16 mbox;
 
         /*
-         * _gbTSState @ base-0x28 (0xD09170): MdlTouchScreenPenDetect 仅在 state==0 时
-         * 接受新的 pen-detect。强制重置确保新的按下事件不被拒绝。
+         * Set _gnTouchScreenPressCount close to but below the firmware
+         * threshold:  threshold = (gnPollingTime + 599) / gnPollingTime.
+         * By setting the counter to (threshold - 2) instead of 0, the
+         * touch handler is allowed only ~2 processing cycles per event,
+         * preventing the 20-message flood seen when the counter is reset
+         * to 0 (the emulator's instant ADC lets the handler loop rapidly).
          */
-        uc_mem_write(MTK, base - 0x28u, &zero32, 4);
+        u32 poll_time = 0;
+        uc_mem_read(MTK, base - 4u, &poll_time, 4);
+        if (poll_time == 0u || poll_time > 5000u)
+            poll_time = 60u;
+        u32 threshold = (poll_time + 599u) / poll_time;
+        u32 press_cnt = (threshold > 2u) ? (threshold - 2u) : 0u;
+        uc_mem_write(MTK, base - 0x34u, &press_cnt, 4);
 
-        /* _gncurrentAdcJob @ base-0x48 (0xD09150): 重置 ADC 双采样状态 */
-        uc_mem_write(MTK, base - 0x48u, &zero32, 1);
-
-        /* _gnTouchScreenPressCount @ base-0x34: 过大时固件跳过 MsSend */
-        uc_mem_write(MTK, base - 0x34u, &zero32, 4);
-
-        /* _gnTouchADCRepeatCounter @ base-0x2C (0xD0916C): 重置 ADC 重试计数 */
-        uc_mem_write(MTK, base - 0x2Cu, &zero32, 4);
-
-        /* _gnCounterFailureTimes @ base-0x08 (0xD09190): 重置失败计数 */
-        uc_mem_write(MTK, base - 0x08u, &zero32, 4);
-
-        /* 邮箱饱和时重置，避免 MsSend 发送失败 */
         if (uc_mem_read(MTK, base, &mbox, 2) == UC_ERR_OK && mbox >= 200u)
         {
             u16 z = 0;
             uc_mem_write(MTK, base, &z, 2);
         }
-
-        /* 确保触摸使能标志有效 */
-        uc_mem_write(MTK, base + 2u, &one, 1);
-
-        /* 清释放计数，防止卡在释放状态机 */
-        uc_mem_write(MTK, base - 0x0cu, &zero32, 4);
     }
 }
 
