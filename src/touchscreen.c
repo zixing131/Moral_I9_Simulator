@@ -160,13 +160,12 @@ void moral_touch_on_pen_down(void)
          * preventing the 20-message flood seen when the counter is reset
          * to 0 (the emulator's instant ADC lets the handler loop rapidly).
          */
-        u32 poll_time = 0;
-        uc_mem_read(MTK, base - 4u, &poll_time, 4);
-        if (poll_time == 0u || poll_time > 5000u)
-            poll_time = 60u;
-        u32 threshold = (poll_time + 599u) / poll_time;
-        u32 press_cnt = (threshold > 2u) ? (threshold - 2u) : 0u;
-        uc_mem_write(MTK, base - 0x34u, &press_cnt, 4);
+        u32 poll = 0;
+        uc_mem_read(MTK, base - 4u, &poll, 4);
+        if (poll == 0) poll = 60;
+        u32 threshold = (poll + 599u) / poll;
+        u32 start_cnt = (threshold > 3) ? (threshold - 3) : 0;
+        uc_mem_write(MTK, base - 0x34u, &start_cnt, 4);
 
         if (uc_mem_read(MTK, base, &mbox, 2) == UC_ERR_OK && mbox >= 200u)
         {

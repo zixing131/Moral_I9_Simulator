@@ -1028,7 +1028,7 @@ void MainUpdateTask()
         if (currentTime > last_gpt1_interrupt_time)
         {
             last_gpt1_interrupt_time = currentTime + 5;
-            EnqueueVMEvent(VM_EVENT_Timer_IRQ, 14, 0);
+            timer_event_pending = 1;
         }
         // if (currentTime > last_gpt2_interrupt_time)
         // {

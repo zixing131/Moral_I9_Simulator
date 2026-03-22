@@ -15,7 +15,8 @@ u32 DrvTimerStdaTimerGetTick = 0; // DrvTimerStdaTimerGetTick
 
 u8 de_small_pending = 0;
 
-static clock_t cursor_de_last_draw = 0;
+static u8 cursor_de_pending = 0;
+static clock_t cursor_de_start_time = 0;
 
 u8 SPI_CMD_Buf[256];
 u32 SPI_CMD_Buf_Idx = 0;
@@ -578,32 +579,14 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             if (is_cursor_de)
             {
                 /*
-                 * Simulate real hardware DE DMA latency for tiny regions.
-                 * On real HW the DMA takes ~1 ms; without this delay the
-                 * firmware's cursor-redraw loop spins thousands of times
-                 * per second, starving every other RTOS task.
-                 *
-                 * We sleep until at least 16 ms (~60 fps) have elapsed
-                 * since the last cursor draw.  SDL_Delay yields the
-                 * emulator thread so the main (SDL event) thread keeps
-                 * running; when we wake we set the completion status and
-                 * the firmware proceeds normally.
+                 * Cursor DE: don't set completion immediately.
+                 * The firmware polls 0x740031A8 (HalDispReadDoneFlag).
+                 * Our hook at 0x740031A8 will return "not done" for ~2ms,
+                 * simulating real HW DMA latency and preventing the
+                 * cursor-redraw loop from running at full speed.
                  */
-                clock_t min_interval = (clock_t)(CLOCKS_PER_SEC / 60);
-                if (min_interval < 1) min_interval = 1;
-
-                while (cursor_de_last_draw != 0 &&
-                       (clock() - cursor_de_last_draw) < min_interval)
-                {
-                    SDL_Delay(1);
-                }
-                cursor_de_last_draw = clock();
-
-                if (de_read_fb(srcBuf, pitch, w, h) == 0)
-                {
-                    de_blit_to_sdl((u16)Lcd_Update_X, (u16)Lcd_Update_Y, w, h, (u32)w * DE_BPP);
-                    Lcd_Need_Update = 1;
-                }
+                cursor_de_pending = 1;
+                cursor_de_start_time = clock();
 
                 tmp = 0xF00;
                 uc_mem_write(MTK, 0x74003148u, &tmp, 4);
@@ -1241,18 +1224,22 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             uc_mem_write(MTK, (u32)address, &value, 4);
         }
         break;
-    case 0x740031A8: // lcd HalDispReadDebugCSValue
+    case 0x740031A8: // lcd HalDispReadDebugCSValue / HalDispReadDoneFlag
         if (type == UC_MEM_READ)
         {
+            if (cursor_de_pending)
+            {
+                clock_t elapsed = clock() - cursor_de_start_time;
+                if (elapsed < 2)
+                {
+                    tmp = 0;
+                    uc_mem_write(MTK, (u32)address, &tmp, 4);
+                    break;
+                }
+                cursor_de_pending = 0;
+            }
             uc_mem_read(MTK, 0x74003000, &value, 4);
-            if ((value & 2) != 0)
-            {
-                value |= 384;
-            }
-            else
-            {
-                value |= 384;
-            }
+            value |= 384;
             uc_mem_write(MTK, (u32)address, &value, 4);
         }
         break;

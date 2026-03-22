@@ -121,22 +121,26 @@ inline vm_event *DequeueVMEvent()
 
 uint64_t handleTick;
 
-static u8  timer_irq_pending = 0;
-static u32 timer_irq_channel = 14;
+volatile u8 timer_event_pending = 0;
 
 inline void handleVmEvent_EMU(uint64_t address)
 {
     u32 tmp;
 
-    /* 重投递上次失败的 Timer IRQ */
-    if (timer_irq_pending)
+    /* 定时器中断投递：由 MainUpdateTask 设置标志，此处尝试投递 */
+    if (timer_event_pending)
     {
         u32 cpsr_t;
         uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_t);
         if (!isIRQ_Disable(cpsr_t))
         {
-            if (StartInterrupt(timer_irq_channel, address))
-                timer_irq_pending = 0;
+            IRQ_MASK_SET_L_Data |= (1u << 14);
+            tmp = 0x20;
+            uc_mem_write(MTK, 0x34002C28, &tmp, 4);
+            uc_mem_read(MTK, 0x34002C04, &halTimerCount, 4);
+            uc_mem_write(MTK, 0x34002C08, &halTimerCount, 4);
+            if (StartInterrupt(14, address))
+                timer_event_pending = 0;
         }
     }
 
@@ -178,43 +182,59 @@ inline void handleVmEvent_EMU(uint64_t address)
 
         if (have_evt)
         {
-            u32 cpsr_chk;
-            uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_chk);
-            if (!isIRQ_Disable(cpsr_chk))
+            if (tevt.r0 == MR_MOUSE_MOVE)
             {
-                IRQ_MASK_SET_L_Data |= (1u << 31);
-                if (tevt.r0 == MR_MOUSE_UP)
+                touch_adc_x = (tevt.r1 >> 16) & 0xffff;
+                touch_adc_y = tevt.r1 & 0xffff;
+                tmp = touch_adc_y * 1023u / 400u;
+                uc_mem_write(MTK, 0x3400C1C8, &tmp, 4);
+                tmp = touch_adc_x * 1023u / 240u;
+                uc_mem_write(MTK, 0x3400C1C0, &tmp, 4);
+                tmp = 2;
+                uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+                pending_touch_active = 0;
+            }
+            else
+            {
+                u32 cpsr_chk;
+                uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_chk);
+                if (!isIRQ_Disable(cpsr_chk))
                 {
-                    tmp = 0;
-                    uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
-                    uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
-                }
-                else
-                {
-                    tmp = 3;
-                    uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
-                    tmp = 1;
-                    uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
-                }
-                if (StartInterrupt(31, address))
-                {
-                    u32 rawX = (tevt.r1 >> 16) & 0xffff;
-                    u32 rawY = tevt.r1 & 0xffff;
-                    if (rawX == 0 && rawY == 0)
-                    { rawX = touchX; rawY = touchY; }
-                    touch_adc_pending = 1;
-                    touch_adc_x = rawX;
-                    touch_adc_y = rawY;
-                    pending_touch_active = 0;
-                    if (tevt.r0 == MR_MOUSE_DOWN)
+                    IRQ_MASK_SET_L_Data |= (1u << 31);
+                    if (tevt.r0 == MR_MOUSE_UP)
                     {
-                        moral_touch_on_pen_down();
-                        auxadc_log_count = 0;
-                        mssend_pop_log = 0;
+                        tmp = 0;
+                        uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
+                        uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
                     }
-                    else if (tevt.r0 == MR_MOUSE_MOVE)
+                    else
                     {
-                        moral_touch_on_pen_down();
+                        tmp = 3;
+                        uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
+                        tmp = 1;
+                        uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+                    }
+                    if (StartInterrupt(31, address))
+                    {
+                        u32 rawX = (tevt.r1 >> 16) & 0xffff;
+                        u32 rawY = tevt.r1 & 0xffff;
+                        if (rawX == 0 && rawY == 0)
+                        { rawX = touchX; rawY = touchY; }
+                        touch_adc_pending = 1;
+                        touch_adc_x = rawX;
+                        touch_adc_y = rawY;
+                        pending_touch_active = 0;
+                        if (tevt.r0 == MR_MOUSE_DOWN)
+                        {
+                            moral_touch_on_pen_down();
+                            auxadc_log_count = 0;
+                            mssend_pop_log = 0;
+                        }
+                    }
+                    else
+                    {
+                        pending_touch_evt = tevt;
+                        pending_touch_active = 1;
                     }
                 }
                 else
@@ -222,11 +242,6 @@ inline void handleVmEvent_EMU(uint64_t address)
                     pending_touch_evt = tevt;
                     pending_touch_active = 1;
                 }
-            }
-            else
-            {
-                pending_touch_evt = tevt;
-                pending_touch_active = 1;
             }
         }
     }
@@ -272,16 +287,14 @@ inline void handleVmEvent_EMU(uint64_t address)
                 uc_mem_write(MTK, 0x34002C28, &tmp, 4);
                 uc_mem_read(MTK, 0x34002C04, &halTimerCount, 4);
                 uc_mem_write(MTK, 0x34002C08, &halTimerCount, 4);
-                if (!StartInterrupt(vmEvent->r0, address))
-                {
-                    timer_irq_pending = 1;
-                    timer_irq_channel = vmEvent->r0;
-                }
+                IRQ_MASK_SET_L_Data |= (1u << vmEvent->r0);
+                StartInterrupt(vmEvent->r0, address);
                 break;
             case VM_EVENT_KEYBOARD:
                 handleKeyPadVmEvent(vmEvent, address);
                 break;
             case VM_EVENT_LCD_IRQ:
+                IRQ_MASK_SET_H_Data |= (1u << 19);
                 if (StartInterrupt(19 + 32, address))
                 {
                     tmp = 0xf << 8;
@@ -291,7 +304,7 @@ inline void handleVmEvent_EMU(uint64_t address)
                 }
                 break;
             case VM_EVENT_DMA_IRQ:
-                // 位于高32位中断
+                IRQ_MASK_SET_H_Data |= (1u << 23);
                 if (StartInterrupt(23 + 32, address))
                 {
                     tmp = 0xffffffff;
@@ -303,13 +316,13 @@ inline void handleVmEvent_EMU(uint64_t address)
             case VM_EVENT_TOUCH_SCREEN_IRQ:
                 break;
             case VM_EVENT_RTC_IRQ:
-                /* 时间已在 RtcTaskMain() 里 Update_RTC_Time()；此处只投递中断。
-                 * 若掩码未就绪则不再反复入队，避免占满事件队列。 */
+                IRQ_MASK_SET_L_Data |= (1u << DEV_IRQ_CHANNEL_RTC);
                 StartInterrupt(DEV_IRQ_CHANNEL_RTC, address);
                 break;
             case VM_EVENT_GPT_IRQ:
                 tmp = vmEvent->r0;
                 uc_mem_write(MTK, 0x81060010, &tmp, 4);
+                IRQ_MASK_SET_L_Data |= (1u << DEV_IRQ_CHANNEL_GPT);
                 StartInterrupt(DEV_IRQ_CHANNEL_GPT, address);
                 break;
             case VM_EVENT_EXIT:
