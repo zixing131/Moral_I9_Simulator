@@ -774,6 +774,7 @@ void initMtkSimalator()
         static const u32 hook_ranges[][2] = {
             {0xA144,    0xA145},     /* pin config */
             {0xCD44,    0xCD45},     /* LCD params */
+            {0x13C4,    0x13C5},     /* HalTouchScreenEnable */
             {0x1E574,   0x1E575},    /* HalDispTransAddr */
             {0x2AE1C,   0x2AE1D},    /* ker_assert */
             {0x2C55E,   0x2C55F},    /* DrvDMA2DIsHWBitBlt */
@@ -785,6 +786,9 @@ void initMtkSimalator()
             {0x1D4B96,  0x1D4B97},   /* nand_translate_DMA */
             {0x1ED480,  0x1ED481},   /* _RtkExceptionRoutine */
             {0x1FE99C,  0x1FE99D},   /* LOG_SD */
+            {0x2196D0,  0x2196D1},   /* MdlTouchScreenStatusReport */
+            {0x2198A8,  0x2198A9},   /* MdlTouchScreenHandle */
+            {0x21A196,  0x21A197},   /* MdlTouchScreenConfigure */
             {0x30F34A,  0x30F34B},   /* dev_accGetLCDStatus */
             {0x32DFA4,  0x32DFA5},   /* _RtkAssertRoutine */
             {0x36ED44,  0x36ED45},   /* fatal error check */
@@ -1393,6 +1397,86 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         uc_reg_read(MTK, UC_ARM_REG_R2, &Lcd_Update_W);
         uc_reg_read(MTK, UC_ARM_REG_R3, &Lcd_Update_H);
         break;
+    case 0x13c4: /* HalTouchScreenEnable entry (Thumb) */
+    {
+        /*
+         * 固件用 gTouchScreenPendetMailbox==0xFF 判断「未初始化」，
+         * 0xFF 时才调用 HalTouchScreenInit 注册 IRQ 31/29 handler
+         * 并设置 pfnTSPenDetUserIsr。
+         * CRT BSS 清零会把它变成 0 → 永远跳过初始化。
+         * 在此强制写回 0xFF，确保 HalTouchScreenInit 一定执行。
+         */
+        u8 val = 0xFF;
+        uc_mem_write(MTK, 0xD00140u, &val, 1);
+        break;
+    }
+    case 0x2198a8: /* MdlTouchScreenHandle entry (Thumb) */
+    {
+        /*
+         * byte_D0919A(订阅标志) 和 gtTouchScreenSusbribeData(邮箱)
+         * 是 .data 段的 CRT scatter-load 变量，若 CRT 未正确复制
+         * 则为 0，MdlTouchScreenStatusReport 不会被调用。
+         * 在此保证值正确。
+         */
+        {
+            u8  sf = 0;
+            u16 mb = 0;
+            uc_mem_read(MTK, 0xD0919Au, &sf, 1);
+            uc_mem_read(MTK, 0xD09198u, &mb, 2);
+            if (sf == 0) {
+                sf = 1;
+                uc_mem_write(MTK, 0xD0919Au, &sf, 1);
+            }
+            if (mb == 0 || mb == 0xFFFF) {
+                mb = 0x34;
+                uc_mem_write(MTK, 0xD09198u, &mb, 2);
+            }
+        }
+        static u8 ts_handle_log = 0;
+        if (ts_handle_log < 20) {
+            u32 z1v, z2v, xloc, yloc;
+            u8  sf; u16 mb;
+            uc_mem_read(MTK, 0xD091B8u, &z1v, 4);
+            uc_mem_read(MTK, 0xD091BCu, &z2v, 4);
+            uc_mem_read(MTK, 0xD0917Cu, &xloc, 4);
+            uc_mem_read(MTK, 0xD09180u, &yloc, 4);
+            uc_mem_read(MTK, 0xD0919Au, &sf, 1);
+            uc_mem_read(MTK, 0xD09198u, &mb, 2);
+            printf("[TS-HANDLE] Z1=%u Z2=%u gX=%u gY=%u subFlag=%u mbox=0x%X\n",
+                   z1v, z2v, xloc, yloc, sf, mb);
+            ts_handle_log++;
+        }
+        break;
+    }
+    case 0x2196d0: /* MdlTouchScreenStatusReport entry (Thumb) */
+    {
+        static u8 ts_report_log = 0;
+        if (ts_report_log < 20) {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            printf("[TS-REPORT] StatusReport called! r0=0x%X r1=0x%X\n", tmp1, tmp2);
+            ts_report_log++;
+        }
+        break;
+    }
+    case 0x21a196: /* MdlTouchScreenConfigure entry (Thumb) */
+    {
+        /*
+         * 固件初始化触摸系统时调用此函数设置 gnPollingTime。
+         * 在此之后重新应用校准补丁，确保 CRT 不会覆盖我们的值。
+         */
+        static u8 ts_cfg_done = 0;
+        if (!ts_cfg_done) {
+            ts_cfg_done = 1;
+            u32 v;
+            v = 0;    uc_mem_write(MTK, 0xD0F3D8u, &v, 4);
+            v = 961;  uc_mem_write(MTK, 0xD0F3DCu, &v, 4);
+            v = 0;    uc_mem_write(MTK, 0xD0F3E0u, &v, 4);
+            v = 1602; uc_mem_write(MTK, 0xD0F3E4u, &v, 4);
+            printf("[touch-hook] calibration patched after MdlTouchScreenConfigure\n");
+        }
+        break;
+    }
     // case 0x1A6E70:
     //     tmp2 = 1;
     //     uc_reg_write(MTK, UC_ARM_REG_R3, &tmp2);

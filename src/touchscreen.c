@@ -38,8 +38,19 @@ static void moral_touch_calibration_patch(void)
 /*
  * IDA MCP：段名 XRAM @0x00D00000，_gtTouchScreenSusbribeData 线性地址 0xD09198。
  */
+/*
+ * 触摸订阅数据 _gtTouchScreenSusbribeData @ 0xD09198：
+ *   +0 (u16) 邮箱 ID = 0x34 (52)
+ *   +2 (u8)  订阅标志 byte_D0919A = 1
+ * IDA 中无静态写交叉引用，但 IDB 快照确认运行时必须为这些值。
+ * 固件可能通过 CRT scatter-load 或间接指针初始化。
+ */
+#define TOUCH_SUBSCRIBE_ADDR     0xD09198u
+#define TOUCH_SUBSCRIBE_FLAG     0xD0919Au
+#define TOUCH_SUBSCRIBE_MAILBOX  0x34u
+
 static const u32 MMI_TOUCH_MAIL_BASES[] = {
-    0xD09198u,
+    TOUCH_SUBSCRIBE_ADDR,
 };
 
 /*
@@ -55,6 +66,31 @@ void moral_touch_init_patch(void)
         return;
 
     moral_touch_calibration_patch();
+
+    /*
+     * _gtTouchScreenSusbribeData: MdlTouchScreenHandle 需要
+     * byte_D0919A != 0 且 gtTouchScreenSusbribeData != 255
+     * 才会通过 MdlTouchScreenStatusReport 发送触摸事件。
+     */
+    {
+        u16 cur_mbox = 0;
+        u8  cur_flag = 0;
+        uc_mem_read(MTK, TOUCH_SUBSCRIBE_ADDR, &cur_mbox, 2);
+        uc_mem_read(MTK, TOUCH_SUBSCRIBE_FLAG, &cur_flag, 1);
+        if (cur_flag == 0)
+        {
+            u8 flag = 1;
+            uc_mem_write(MTK, TOUCH_SUBSCRIBE_FLAG, &flag, 1);
+            printf("[touch-patch] set subscribe flag @ 0x%X = 1\n", TOUCH_SUBSCRIBE_FLAG);
+        }
+        if (cur_mbox == 0 || cur_mbox == 0xFF)
+        {
+            u16 mbox = (u16)TOUCH_SUBSCRIBE_MAILBOX;
+            uc_mem_write(MTK, TOUCH_SUBSCRIBE_ADDR, &mbox, 2);
+            printf("[touch-patch] set subscriber mailbox @ 0x%X = 0x%X\n",
+                   TOUCH_SUBSCRIBE_ADDR, TOUCH_SUBSCRIBE_MAILBOX);
+        }
+    }
 
     /*
      * bLCDisOn @ 0xD007F8: DispUpdateScreenMdl 通过 DrvLcdCheckPowerStatus

@@ -92,13 +92,14 @@ static u32 auxadc_resolve_channel(u32 cmd)
 }
 
 /*
- * Snapshot of touch coordinates at the time of each ADC X-channel
- * read. The GetXCoordination/GetYCoordination hooks must return
- * these values (not the live touchX/touchY) to keep firmware's
- * coordinate pipeline consistent.
+ * Snapshot of touch coordinates, taken once per touch-down event.
+ * Both ADC reads in a cycle (location + resistance) return the
+ * same snapshot values, preventing the firmware's consistency
+ * check (|temp1 - temp2| <= 16) from failing due to mouse movement.
  */
 u32 adc_snapshot_x = 0;
 u32 adc_snapshot_y = 0;
+static u8 adc_snapshot_done = 0;
 
 static u32 auxadc_get_result(void)
 {
@@ -108,17 +109,24 @@ static u32 auxadc_get_result(void)
     if (cmd12 == 0x711u && isTouchDown)
         SDL_Delay(2);
 
+    if (!isTouchDown)
+        adc_snapshot_done = 0;
+
     /*
-     * Snapshot coordinates when the X channel is read (first channel
-     * of each ADC cycle). All subsequent reads in this cycle (Y, Z1,
-     * Z2) and the GetX/GetYCoordination hooks use this snapshot,
-     * preventing coordinate skew during the ~75ms polling window.
+     * Snapshot coordinates once per ADC cycle (location + resistance).
+     * The first X-channel read (0x711) of each cycle takes a fresh
+     * snapshot. The flag is cleared after the YR-channel read (0x191)
+     * which ends the resistance phase, allowing the next cycle to
+     * pick up updated mouse coordinates during a drag.
      */
-    if (cmd12 == 0x711u && isTouchDown)
+    if (cmd12 == 0x711u && isTouchDown && !adc_snapshot_done)
     {
         adc_snapshot_x = touchX < 240u ? touchX : 239u;
         adc_snapshot_y = touchY < 400u ? touchY : 399u;
+        adc_snapshot_done = 1;
     }
+    if (cmd12 == 0x191u)
+        adc_snapshot_done = 0;
 
     switch (cmd12)
     {
