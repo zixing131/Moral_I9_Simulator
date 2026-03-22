@@ -1335,14 +1335,14 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
      */
     if (((u32)address & ~1u) == 0x219878u) /* _MdlTouchscreenGetXCoordination */
     {
-        tmp1 = touchX;
+        tmp1 = adc_snapshot_x;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp2);
         uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
     }
     if (((u32)address & ~1u) == 0x219848u) /* _MdlTouchscreenGetYCoordination */
     {
-        tmp1 = touchY;
+        tmp1 = adc_snapshot_y;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp2);
         uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);

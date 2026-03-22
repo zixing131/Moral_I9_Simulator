@@ -56,6 +56,8 @@ void hookBlockCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *use
 void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 extern u8 mssend_pop_log;
 extern u8 de_small_pending;
+extern u32 adc_snapshot_x;
+extern u32 adc_snapshot_y;
 void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data);
 void onCPRSChange(uc_engine *uc, uint64_t address, uint32_t size, u32 data);
 void SaveCpuContext(u32 *);
