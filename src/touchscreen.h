@@ -29,5 +29,7 @@ void mtk_touch_regs_sync(void);
 void mtk_touch_hook_mem_read(uint64_t address);
 /** 每次 pen-DOWN 时重置固件触摸状态（PressCount / 邮箱等），防止触摸状态机卡死 */
 void moral_touch_on_pen_down(void);
+/** pen-MOVE 时设置计数器使固件仅做 1 次 ADC 轮询，用于追踪拖动手势 */
+void moral_touch_on_pen_move(void);
 
 #endif /* TOUCHSCREEN_H */

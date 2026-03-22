@@ -555,7 +555,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             if (h > DE_PANEL_H) h = (u16)DE_PANEL_H;
             if (pitch == 0u) pitch = (u32)w * DE_BPP;
 
-            if (de_trigger_cnt <= 20 || (de_trigger_cnt % 100) == 0)
+            if (de_trigger_cnt <= 50 || (de_trigger_cnt % 50) == 0)
             {
                 printf("[DE-trigger] #%u buf=0x%x pitch=%u w=%u h=%u\n",
                     de_trigger_cnt, srcBuf, pitch, w, h);
@@ -1238,8 +1238,14 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 }
                 cursor_de_pending = 0;
             }
+            /*
+             * HalDispReadDebugCSValue checks bit 6 (when 0x74003000 & 2)
+             * or bit 7 (otherwise). We must set BOTH bits so the firmware's
+             * HalDispBusyLoop sees "done" on the first poll, avoiding a
+             * 3000-iteration busy-wait that starves the RTOS scheduler.
+             */
             uc_mem_read(MTK, 0x74003000, &value, 4);
-            value |= 384;
+            value |= 0x1C0; /* bits 6, 7, 8 */
             uc_mem_write(MTK, (u32)address, &value, 4);
         }
         break;

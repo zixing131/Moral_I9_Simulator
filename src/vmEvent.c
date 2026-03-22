@@ -186,13 +186,39 @@ inline void handleVmEvent_EMU(uint64_t address)
             {
                 touch_adc_x = (tevt.r1 >> 16) & 0xffff;
                 touch_adc_y = tevt.r1 & 0xffff;
-                tmp = touch_adc_y * 1023u / 400u;
-                uc_mem_write(MTK, 0x3400C1C8, &tmp, 4);
-                tmp = touch_adc_x * 1023u / 240u;
-                uc_mem_write(MTK, 0x3400C1C0, &tmp, 4);
-                tmp = 2;
-                uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
-                pending_touch_active = 0;
+
+                /*
+                 * Trigger IRQ 31 (pen-detect) for MOVE events so the firmware
+                 * restarts ADC polling and reads the updated coordinates.
+                 * Without this, the firmware stops polling after the initial
+                 * pen-down cycle and can't track drag gestures (unlock swipe).
+                 */
+                u32 cpsr_chk;
+                uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_chk);
+                if (!isIRQ_Disable(cpsr_chk))
+                {
+                    IRQ_MASK_SET_L_Data |= (1u << 31);
+                    tmp = 3;
+                    uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
+                    tmp = 1;
+                    uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+                    if (StartInterrupt(31, address))
+                    {
+                        touch_adc_pending = 1;
+                        moral_touch_on_pen_move();
+                        pending_touch_active = 0;
+                    }
+                    else
+                    {
+                        pending_touch_evt = tevt;
+                        pending_touch_active = 1;
+                    }
+                }
+                else
+                {
+                    pending_touch_evt = tevt;
+                    pending_touch_active = 1;
+                }
             }
             else
             {

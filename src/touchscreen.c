@@ -155,10 +155,8 @@ void moral_touch_on_pen_down(void)
         /*
          * Set _gnTouchScreenPressCount close to but below the firmware
          * threshold:  threshold = (gnPollingTime + 599) / gnPollingTime.
-         * By setting the counter to (threshold - 2) instead of 0, the
-         * touch handler is allowed only ~2 processing cycles per event,
-         * preventing the 20-message flood seen when the counter is reset
-         * to 0 (the emulator's instant ADC lets the handler loop rapidly).
+         * Allow ~3 processing cycles on pen-down so the firmware gets
+         * enough coordinate samples for the initial touch position.
          */
         u32 poll = 0;
         uc_mem_read(MTK, base - 4u, &poll, 4);
@@ -172,6 +170,30 @@ void moral_touch_on_pen_down(void)
             u16 z = 0;
             uc_mem_write(MTK, base, &z, 2);
         }
+    }
+}
+
+void moral_touch_on_pen_move(void)
+{
+    if (MTK == NULL)
+        return;
+
+    for (unsigned bi = 0; bi < sizeof MMI_TOUCH_MAIL_BASES / sizeof MMI_TOUCH_MAIL_BASES[0]; bi++)
+    {
+        u32 base = MMI_TOUCH_MAIL_BASES[bi];
+
+        /*
+         * For move events, set the counter to threshold-1 so the firmware
+         * does exactly 1 ADC poll cycle, generating 1 MsSend with updated
+         * coordinates. This lets the firmware track drag gestures without
+         * the 16-message flood that happens when the counter is at 0.
+         */
+        u32 poll = 0;
+        uc_mem_read(MTK, base - 4u, &poll, 4);
+        if (poll == 0) poll = 60;
+        u32 threshold = (poll + 599u) / poll;
+        u32 start_cnt = (threshold > 1) ? (threshold - 1) : 0;
+        uc_mem_write(MTK, base - 0x34u, &start_cnt, 4);
     }
 }
 
