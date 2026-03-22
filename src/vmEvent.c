@@ -3,20 +3,9 @@
 #define MAX_VM_EVENT_COUNT 512
 #define MAX_VM_EVENT_WAIT_COUNT 512
 
-static u8  touch_adc_pending = 0;
-static u32 touch_adc_x = 0;
-static u32 touch_adc_y = 0;
-static u8  touch_irq_pending = 0;
-
-static vm_event pending_touch_evt;
-static u8 pending_touch_active = 0;
-
-void moral_vm_touch_adc_request(u32 x, u32 y)
-{
-    touch_adc_pending = 1;
-    touch_adc_x = x;
-    touch_adc_y = y;
-}
+extern u32 aux_irq_en;
+extern u32 aux_irq_sts;
+extern volatile u8 pen_detect_pending;
 
 u32 keyRowIdx = 0;
 u32 keyColIdx = 0;
@@ -49,8 +38,6 @@ int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
             {
                 if (VmEventCount >= MAX_VM_EVENT_COUNT)
                     break;
-                if (VmEventHandleWaitList[i].event == VM_EVENT_TOUCH_SCREEN_IRQ)
-                    touch_irq_pending = 1;
                 VmEventHandleList[VmEventCount++] = VmEventHandleWaitList[i];
             }
             VmEventWaitCount = 0;
@@ -58,21 +45,17 @@ int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
             evt->event = event;
             evt->r0 = r0;
             evt->r1 = r1;
-            if (event == VM_EVENT_TOUCH_SCREEN_IRQ)
-                touch_irq_pending = 1;
             vmIsLock = 0;
         }
         else
         {
-            if (VmEventWaitCount < MAX_VM_EVENT_WAIT_COUNT)
-            {
-                vm_event *evt = &VmEventHandleWaitList[VmEventWaitCount++];
-                evt->event = event;
-                evt->r0 = r0;
-                evt->r1 = r1;
-                if (event == VM_EVENT_TOUCH_SCREEN_IRQ)
-                    touch_irq_pending = 1;
-            }
+                if (VmEventWaitCount < MAX_VM_EVENT_WAIT_COUNT)
+                {
+                    vm_event *evt = &VmEventHandleWaitList[VmEventWaitCount++];
+                    evt->event = event;
+                    evt->r0 = r0;
+                    evt->r1 = r1;
+                }
             else
                 printf("WARNING:Max VmEventWaitCount\n");
         }
@@ -122,6 +105,8 @@ inline vm_event *DequeueVMEvent()
 uint64_t handleTick;
 
 volatile u8 timer_event_pending = 0;
+volatile u8 soft_timer_event_pending = 0;
+volatile u8 irq13_chained = 0;
 
 inline void handleVmEvent_EMU(uint64_t address)
 {
@@ -158,10 +143,6 @@ inline void handleVmEvent_EMU(uint64_t address)
             IRQ_MASK_SET_L_Data |= (1u << 14);
             tmp = 0x20;
             uc_mem_write(MTK, 0x34002C28, &tmp, 4);
-            /*
-             * 0x34002C04 的 MEM_READ hook 返回基于 clock() 的模拟计数器。
-             * 直接 uc_mem_read 不触发 hook，需用同样的公式算出当前值。
-             */
             {
                 static clock_t os_timer_base_evt = 0;
                 if (os_timer_base_evt == 0) os_timer_base_evt = clock();
@@ -170,131 +151,50 @@ inline void handleVmEvent_EMU(uint64_t address)
             uc_mem_write(MTK, 0x34002C04, &halTimerCount, 4);
             uc_mem_write(MTK, 0x34002C08, &halTimerCount, 4);
             if (StartInterrupt(14, address))
+            {
                 timer_event_pending = 0;
-        }
-    }
-
-    /* 触摸 DOWN/UP/MOVE 事件优先处理，先触发 pen-detect IRQ 31 */
-    if (pending_touch_active || (touch_irq_pending && VmEventCount > 0 && vmIsLock == 0))
-    {
-        vm_event tevt;
-        u8 have_evt = 0;
-
-        if (pending_touch_active)
-        {
-            tevt = pending_touch_evt;
-            have_evt = 1;
-        }
-        else
-        {
-            touch_irq_pending = 0;
-            u32 i;
-            for (i = 0; i < VmEventCount; i++)
-            {
-                if (VmEventHandleList[i].event == VM_EVENT_TOUCH_SCREEN_IRQ)
-                {
-                    tevt = VmEventHandleList[i];
-                    u32 j;
-                    VmEventCount--;
-                    for (j = i; j < VmEventCount; j++)
-                        VmEventHandleList[j] = VmEventHandleList[j + 1];
-                    have_evt = 1;
-                    for (j = i; j < VmEventCount; j++)
-                    {
-                        if (VmEventHandleList[j].event == VM_EVENT_TOUCH_SCREEN_IRQ)
-                        { touch_irq_pending = 1; break; }
-                    }
-                    break;
-                }
-            }
-            (void)have_evt;
-        }
-
-        if (have_evt)
-        {
-            if (tevt.r0 == MR_MOUSE_MOVE)
-            {
                 /*
-                 * MOVE: only update cached ADC coords. No IRQ at all.
-                 * The firmware's ongoing ADC polling cycle (started by
-                 * pen-down IRQ 31) reads these values naturally. Triggering
-                 * IRQ 29 here causes the firmware to restart its ADC state
-                 * machine, generating extra MsSend messages.
+                 * IRQ 13 (Rtk10TimeSoftHandler) 通过固件 HalCommonIntHandler
+                 * 循环链式投递，避免嵌套中断导致 SPSR/T-bit 损坏。
+                 * 设置掩码位和队列标记，hookRam 的 IRQ 清除钩子会在
+                 * IRQ 14 处理完毕后将 IRQ 13 号码写入应答寄存器。
                  */
-                touch_adc_x = (tevt.r1 >> 16) & 0xffff;
-                touch_adc_y = tevt.r1 & 0xffff;
-                pending_touch_active = 0;
-            }
-            else
-            {
-                u32 cpsr_chk;
-                uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_chk);
-                if (!isIRQ_Disable(cpsr_chk))
+                if (soft_timer_event_pending)
                 {
-                    IRQ_MASK_SET_L_Data |= (1u << 31);
-                    if (tevt.r0 == MR_MOUSE_UP)
-                    {
-                        tmp = 0;
-                        uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
-                        uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
-                    }
-                    else
-                    {
-                        tmp = 3;
-                        uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
-                        tmp = 1;
-                        uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
-                    }
-                    if (StartInterrupt(31, address))
-                    {
-                        u32 rawX = (tevt.r1 >> 16) & 0xffff;
-                        u32 rawY = tevt.r1 & 0xffff;
-                        if (rawX == 0 && rawY == 0)
-                        { rawX = touchX; rawY = touchY; }
-                        touch_adc_pending = 1;
-                        touch_adc_x = rawX;
-                        touch_adc_y = rawY;
-                        pending_touch_active = 0;
-                        if (tevt.r0 == MR_MOUSE_DOWN)
-                        {
-                            moral_touch_on_pen_down();
-                            auxadc_log_count = 0;
-                            mssend_pop_log = 0;
-                        }
-                    }
-                    else
-                    {
-                        pending_touch_evt = tevt;
-                        pending_touch_active = 1;
-                    }
-                }
-                else
-                {
-                    pending_touch_evt = tevt;
-                    pending_touch_active = 1;
+                    IRQ_MASK_SET_L_Data |= (1u << 13);
+                    uc_mem_write(MTK, 0x3400181C, &IRQ_MASK_SET_L_Data, 4);
+                    irq13_chained = 1;
+                    soft_timer_event_pending = 0;
                 }
             }
         }
     }
 
-    /* ADC 触摸坐标：始终写入寄存器供固件轮询，IRQ 可用时额外触发 IRQ 29 加速响应 */
-    if (touch_adc_pending)
+    /*
+     * Pen detect 硬件级触发：
+     * SDL 线程设置 pen_detect_pending=1（DOWN 事件），
+     * 此处将 AUX_IRQ_STS bit0 置位并在 IRQ 使能时触发 IRQ 31。
+     * 固件的 HalTSPenDetIrqHandler 自然检查 IRQ_STS & IRQ_EN，
+     * 之后通过消息链触发 ADC 读取，完全走硬件路径。
+     */
+    if (pen_detect_pending)
     {
-        u32 ax = touch_adc_x, ay = touch_adc_y;
-        tmp = ay * 1023u / 400u;
-        uc_mem_write(MTK, 0x3400C1C8, &tmp, 4);
-        tmp = ax * 1023u / 240u;
-        uc_mem_write(MTK, 0x3400C1C0, &tmp, 4);
-        tmp = isTouchDown ? 2 : 0;
-        uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+        aux_irq_sts |= 1;
+        uc_mem_write(MTK, 0x3400C1C4u, &aux_irq_sts, 4);
 
-        u32 cpsr_val;
-        uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_val);
-        if (!isIRQ_Disable(cpsr_val))
+        if (aux_irq_en & 1)
         {
-            IRQ_MASK_SET_L_Data |= (1u << 29);
-            if (StartInterrupt(29, address))
-                touch_adc_pending = 0;
+            u32 cpsr_chk;
+            uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_chk);
+            if (!isIRQ_Disable(cpsr_chk))
+            {
+                IRQ_MASK_SET_L_Data |= (1u << 31);
+                if (StartInterrupt(31, address))
+                {
+                    pen_detect_pending = 0;
+                    auxadc_log_count = 0;
+                }
+            }
         }
     }
 

@@ -1,73 +1,73 @@
-_gatCtlTbl 0xD47408
+_gatCtlTbl 0xD47408 (BSS段，运行时填充，静态IDA无法读取)
+每个条目 8 字节: [DWORD ISR函数指针] [WORD 标志] [BYTE 优先级] [BYTE 嵌套计数]
+HalCommonIntHandler 读取 0x34001840 获取当前 IRQ 号，通过 gatCtlTbl[irq*2] 分发
 
-MASK_L_中断
+MASK_L_中断 (IRQ 0-31, 状态寄存器 0x34001864, 掩码 0x3400181C)
 
-HalCommonIntHandler 通用中断处理入口
+0  HalAsuraIrqHandler                    不需要 (外部/ASURA中断)
+1                                        未使用
+2                                        未使用
+3                                        未使用
+4                                        未使用
+5                                        未使用
+6                                        未使用
+7                                        未使用
+8                                        未使用
+9                                        未使用
+10                                       已处理 (GPT, gpt.c -> VM_EVENT_GPT_IRQ)
+11                                       未使用
+12 DrvKeypadISR                          已处理 (keypad.c -> VM_EVENT_KEYBOARD)
+13 Rtk10TimeSoftHandler                  已处理 (vmEvent.c -> soft_timer_event_pending, 5ms周期)
+14 Rtk10TimerHandler                     已处理 (vmEvent.c -> timer_event_pending, 5ms周期)
+15                                       未使用
+16                                       未使用
+17                                       未使用
+18                                       未使用
+19                                       未使用
+20                                       未使用
+21 hwll1_InitFintISR                     不需要 (L1 FINT, 基带相关)
+22 hwll1_InitSintISR                     不需要 (L1 SINT, 基带相关)
+23                                       未使用
+24                                       未使用
+25 hwlbb_DsmaIsr                        不需要 (基带 DSMA)
+26 hwldsp_Isr                           不需要 (DSP 中断)
+27                                       未使用
+28                                       未使用
+29 HalTSAdcDoneIrqHandler               已处理 (vmEvent.c -> touch_adc_pending, ADC完成)
+30                                       未使用
+31 HalTSPenDetIrqHandler                已处理 (vmEvent.c -> 触摸DOWN/UP事件, pen-detect)
 
-0 HalAsuraIrqHandler
-1
-2
-3
-4
-5
-6
-7
-8
-9
-10
-11
-12 DrvKeypadISR
-13 Rtk10TimeSoftHandler 已处理
-14 Rtk10TimerHandler 已处理
-15 
-16
-17
-18
-19
-20 
-21 hwll1_InitFintISR
-22 hwll1_InitSintISR
-23
-24 
-25 hwlbb_DsmaIsr
-26 hwldsp_Isr
-27
-28
-29 HalTSAdcDoneIrqHandler
-30
-31 HalTSPenDetIrqHandler
+MASK_H_中断 (IRQ 32-63, 状态寄存器 0x34001868, 掩码 0x34001820)
 
-MASK_H_中断
-
-0 SimISR
-1 SimISR_2
-2 TbuWakeUpISR
-3 sys_watchDogHandler
-4 _HalEmiInterruptHandler
-5 
-6 _RiuSwIrqHandler
-7
-8
-9
-10
-11
-12
-13
-14 
-15 MDrvFcieIsrHandler 已处理
-16
-17
-18 
-19 HalDisp_IrqFun 已处理
-20
-21
-22 
-23 _DrvDMA2DIrqHandler ??
-24
-25
-26
-27
-28
-29
-30
-31
+0  SimISR                               不需要 (SIM卡中断)
+1  SimISR_2                             不需要 (SIM卡中断)
+2  TbuWakeUpISR                         不需要 (TBU唤醒)
+3  sys_watchDogHandler                  不需要 (看门狗)
+4  _HalEmiInterruptHandler             不需要 (EMI内存接口)
+5                                       未使用
+6  _RiuSwIrqHandler                    待观察 (RIU软件中断, 可能用于RTOS延迟处理)
+7                                       未使用
+8                                       未使用
+9                                       未使用
+10                                      未使用
+11                                      未使用
+12                                      未使用
+13                                      未使用
+14                                      未使用
+15 MDrvFcieIsrHandler                   已处理 (vmEvent.c -> VM_EVENT_MSDC_IRQ, SD卡)
+16                                      未使用
+17                                      未使用
+18                                      未使用
+19 HalDisp_IrqFun                      已处理 (vmEvent.c -> VM_EVENT_LCD_IRQ, 显示引擎)
+20                                      未使用
+21                                      未使用
+22                                      未使用
+23 _DrvDMA2DIrqHandler                 已处理 (vmEvent.c -> VM_EVENT_DMA_IRQ, DMA2D)
+24                                      未使用
+25                                      未使用
+26                                      未使用
+27                                      未使用
+28                                      未使用
+29                                      未使用
+30                                      未使用
+31                                      未使用

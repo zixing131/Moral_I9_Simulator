@@ -13,6 +13,8 @@ u32 halTimerCnt = 0;              // HalTimerUDelay调用
 u32 halTimerCntMax = 0;           // HalTimerUDelay调用
 u32 DrvTimerStdaTimerGetTick = 0; // DrvTimerStdaTimerGetTick
 
+extern volatile u8 irq13_chained;
+
 u8 de_small_pending = 0;
 
 u8 cursor_de_pending = 0;
@@ -49,12 +51,22 @@ u32 LCD_CMD_Data = 0;
 
 /*
  * AUX ADC 触摸采样模拟。
- * 固件通过写 0x3400C184 选择 ADC 通道，再读 0x3400C198 取 10-bit 结果。
- * 通道命令：0x711 → X，0xB81 → Y，其余 → 压力值
+ * 固件通过写 0x3400C184 (AUX_CON1) 选择 ADC 通道，再读 0x3400C198 (AUX_DAT) 取 10-bit 结果。
+ * 通道命令：0x711 → X，0xB81 → Y，0x781 → Z1，0x7B1 → Z2
+ *
+ * AUX IRQ 寄存器（基址 0x3400C180）：
+ *   +0x38 (0x3400C1B8) AUX_IRQ_CLR  — 写1清除对应中断状态
+ *   +0x3C (0x3400C1BC) AUX_IRQ_EN   — bit0=pen detect, bit1=ADC done
+ *   +0x44 (0x3400C1C4) AUX_IRQ_STS  — bit0=pen detect pending, bit1=ADC done pending
  */
 static u32 auxadc_last_cmd = 0;
 
 static u8 auxadc_log_count = 0;
+
+/* AUX IRQ 硬件寄存器状态 */
+u32 aux_irq_en  = 0;
+u32 aux_irq_sts = 0;
+volatile u8 pen_detect_pending = 0;
 
 /* 固件写入值可能在不同位域带通道号，取多种切片与已知通道表匹配 */
 static u32 auxadc_resolve_channel(u32 cmd)
@@ -1330,9 +1342,17 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         {
             IRQ_MASK_SET_L_Data &= (~value);
             uc_mem_write(MTK, 0x3400181C, &IRQ_MASK_SET_L_Data, 4);
-            value = 0x1fc; // 设置中断号码大于等于0x40退出中断?
-            uc_mem_write(MTK, 0x34001840, &value, 4);
-            // printf("清除中断掩码:%x\n", value);
+            if (irq13_chained && (value & (1u << 14)) && (IRQ_MASK_SET_L_Data & (1u << 13)))
+            {
+                u32 next = (13u << 2);
+                uc_mem_write(MTK, 0x34001840, &next, 4);
+                irq13_chained = 0;
+            }
+            else
+            {
+                value = 0x1fc;
+                uc_mem_write(MTK, 0x34001840, &value, 4);
+            }
         }
         break;
     case 0x34001858: // 中断清除
@@ -1431,11 +1451,14 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             handleTouchScreenReg(address, data, value);
         else if (address >= 0x3400C080u && address < 0x3400C400u)
         {
-            /* 触摸 AUXADC：命令可能在 C180~C18C，数据读或为半字/字节 */
             if (type == UC_MEM_WRITE && address == 0x3400C184u)
+            {
+                /* AUX_CON1: ADC 通道/转换参数 */
                 auxadc_last_cmd = (u32)value;
+            }
             else if (type == UC_MEM_READ && address == 0x3400C198u)
             {
+                /* AUX_DAT: 10-bit ADC 转换结果 */
                 tmp = auxadc_get_result();
                 if (size >= 4)
                     uc_mem_write(MTK, (u32)address, &tmp, 4);
@@ -1450,9 +1473,31 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                     uc_mem_write(MTK, (u32)address, &b, 1);
                 }
             }
-            else if (type == UC_MEM_READ)
+            else if (type == UC_MEM_WRITE && address == 0x3400C1BCu)
             {
-                mtk_touch_hook_mem_read(address);
+                /* AUX_IRQ_EN: 中断使能寄存器 */
+                u32 old_en = aux_irq_en;
+                aux_irq_en = (u32)value;
+                /* 固件重新使能 pen detect 且有挂起状态 → 标记待触发 IRQ 31 */
+                if (!(old_en & 1) && (aux_irq_en & 1) && (aux_irq_sts & 1))
+                    pen_detect_pending = 1;
+            }
+            else if (type == UC_MEM_READ && address == 0x3400C1BCu)
+            {
+                /* AUX_IRQ_EN: 返回当前使能状态 */
+                uc_mem_write(MTK, 0x3400C1BCu, &aux_irq_en, 4);
+            }
+            else if (type == UC_MEM_WRITE && address == 0x3400C1B8u)
+            {
+                /* AUX_IRQ_CLR: 写1清除对应中断状态位 */
+                u32 clr = (u32)value;
+                aux_irq_sts &= ~clr;
+                uc_mem_write(MTK, 0x3400C1C4u, &aux_irq_sts, 4);
+            }
+            else if (type == UC_MEM_READ && address == 0x3400C1C4u)
+            {
+                /* AUX_IRQ_STS: 返回当前中断状态 */
+                uc_mem_write(MTK, 0x3400C1C4u, &aux_irq_sts, 4);
             }
         }
         else if (address >= 0x81060000 && address < 0x81060100)
@@ -1461,9 +1506,24 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         break;
     }
 }
-void hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
+bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
 {
     printf("地址无法访问:%x\n", address);
+    return false;
+}
+
+bool hookRomWriteProtect(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
+{
+    u32 pc;
+    uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+    static u8 rom_wp_log = 0;
+    if (rom_wp_log < 30)
+    {
+        rom_wp_log++;
+        printf("[ROM-WP] blocked write 0x%x size=%u val=0x%x from pc=0x%x\n",
+               (u32)address, size, (u32)value, pc);
+    }
+    return true;
 }
 
 bool hookInsnInvalid(uc_engine *uc, void *user_data)
@@ -1480,10 +1540,25 @@ bool hookInsnInvalid(uc_engine *uc, void *user_data)
     {
         printf("mrc指令:%x\n", insn);
     }
+    else if (ROM_PRISTINE && pc < GUEST_LOW_IMAGE_MAP_SIZE)
+    {
+        u32 pristine_insn;
+        memcpy(&pristine_insn, ROM_PRISTINE + pc, 4);
+        if (pristine_insn != insn)
+        {
+            u32 page_start = pc & ~0xFFu;
+            u32 page_end = page_start + 256;
+            if (page_end > GUEST_LOW_IMAGE_MAP_SIZE)
+                page_end = GUEST_LOW_IMAGE_MAP_SIZE;
+            printf("[ROM-REPAIR] pc=0x%x page=[0x%x-0x%x]\n", pc, page_start, page_end);
+            uc_mem_write(MTK, page_start, ROM_PRISTINE + page_start, page_end - page_start);
+            uc_ctl_remove_cache(MTK, (uint64_t)page_start, (uint64_t)page_end);
+            return true;
+        }
+        printf("指令无效:%x\n", insn);
+    }
     else
         printf("指令无效:%x\n", insn);
-    // 返回true继续
-    // 返回false停止
 
     return 0;
 }

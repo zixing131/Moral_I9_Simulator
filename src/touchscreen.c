@@ -5,20 +5,6 @@ u32 touchX;
 u32 touchY;
 u32 isInitTouch;
 
-/* 与 vmEvent.c 中触摸中断写入保持一致，便于固件轮询 0x3400C1xx */
-#define MTK_TP_REG_STATUS 0x3400C1BCu
-#define MTK_TP_REG_UNK    0x3400C1C4u
-#define MTK_TP_REG_X      0x3400C1C0u
-#define MTK_TP_REG_Y      0x3400C1C8u
-
-/*
- * IDA MCP：段名 XRAM @0x00D00000，_gtTouchScreenSusbribeData 线性地址 0xD09198（即 0x00D09198）。
- * 不是 0x0D000000+0x9198（那是 218MB 带，与 scatter 无关）。
- */
-static const u32 MMI_TOUCH_MAIL_BASES[] = {
-    0xD09198u,
-};
-
 /*
  * 校准地址（IDA XRAM 段）：
  * _gtCalibrationInfo @ 0xD0F3D8  —  X offset
@@ -49,13 +35,21 @@ static void moral_touch_calibration_patch(void)
     v = 1602; uc_mem_write(MTK, CALIB_Y_SCALE_ADDR,  &v, 4);
 }
 
-static void moral_touch_mmi_ram_patch(void)
+/*
+ * IDA MCP：段名 XRAM @0x00D00000，_gtTouchScreenSusbribeData 线性地址 0xD09198。
+ */
+static const u32 MMI_TOUCH_MAIL_BASES[] = {
+    0xD09198u,
+};
+
+/*
+ * 一次性初始化补丁：校准参数 + 固件环境安全修复。
+ * 不再修改 PressCount、邮箱等运行时状态（固件自行管理）。
+ */
+void moral_touch_init_patch(void)
 {
     u8 one = 1;
-    u8 ts_mode = 1;
     u32 zero32 = 0;
-    u32 poll_ok = 60u;
-    unsigned bi;
 
     if (MTK == NULL)
         return;
@@ -68,129 +62,25 @@ static void moral_touch_mmi_ram_patch(void)
      */
     uc_mem_write(MTK, 0xD007F8u, &one, 1);
 
-    for (bi = 0; bi < sizeof MMI_TOUCH_MAIL_BASES / sizeof MMI_TOUCH_MAIL_BASES[0]; bi++)
+    for (unsigned bi = 0; bi < sizeof MMI_TOUCH_MAIL_BASES / sizeof MMI_TOUCH_MAIL_BASES[0]; bi++)
     {
         u32 base = MMI_TOUCH_MAIL_BASES[bi];
-        u16 mbox;
+        u8 ts_mode = 1;
+        u32 poll_ok = 60u;
         u32 poll;
-        /* +2 byte_D0919A，+4 gReEnableTouchScreenFlag（相对邮箱半字） */
-        if (uc_mem_write(MTK, base + 2u, &one, 1) != UC_ERR_OK)
-            continue;
-        uc_mem_write(MTK, base + 4u, &zero32, 1);
-        if (uc_mem_read(MTK, base, &mbox, 2) == UC_ERR_OK && mbox == 255u)
-        {
-            u16 z = 0;
-            uc_mem_write(MTK, base, &z, 2);
-        }
+
         /*
-         * _gnTsPrMode @ 0xd09156 = base - 0x42：DoMainJob 需 LCD 开或 gnTsPrMode==1 才走触摸 ADC
-         * _gnTouchScreenPressCount @ 0xd09164 = base - 0x34：过大时 LABEL_27 直接 return，永不 MsSend
-         * _gnPollingTime @ 0xd09194 = base - 4：为 0 或未初始化除法会崩；过大时 (T+599)/T==1 一次上报后即被屏蔽
+         * _gnTsPrMode @ base - 0x42：DoMainJob 需 LCD 开或 gnTsPrMode==1 才走触摸 ADC。
+         * 模拟器中 LCD 状态可能不准，强制设为 1。
          */
         uc_mem_write(MTK, base - 0x42u, &ts_mode, 1);
-        uc_mem_write(MTK, base - 0x34u, &zero32, 4);
+
+        /*
+         * _gnPollingTime @ base - 4：为 0 时固件除法崩溃；过大时触摸不灵敏。
+         * 仅在无效时设安全默认值。
+         */
         if (uc_mem_read(MTK, base - 4u, &poll, 4) == UC_ERR_OK && (poll == 0u || poll > 5000u))
             uc_mem_write(MTK, base - 4u, &poll_ok, 4);
-        /* 按压时清释放计数，避免卡在释放状态机 */
-        if (isTouchDown)
-            uc_mem_write(MTK, base - 0x0cu, &zero32, 4);
-    }
-}
-
-void mtk_touch_regs_sync(void)
-{
-    u32 tmp;
-    if (MTK == NULL)
-        return;
-    u32 sx = touchX;
-    u32 sy = touchY;
-    if (sx >= 240u)
-        sx = 239u;
-    if (sy >= 400u)
-        sy = 399u;
-
-    tmp = sx * 1023u / 240u;
-    uc_mem_write(MTK, MTK_TP_REG_X, &tmp, 4);
-    tmp = sy * 1023u / 400u;
-    uc_mem_write(MTK, MTK_TP_REG_Y, &tmp, 4);
-
-    if (isTouchDown)
-    {
-        tmp = 3;
-        uc_mem_write(MTK, MTK_TP_REG_STATUS, &tmp, 4);
-        tmp = 1;
-        uc_mem_write(MTK, MTK_TP_REG_UNK, &tmp, 4);
-    }
-    else
-    {
-        tmp = 0;
-        uc_mem_write(MTK, MTK_TP_REG_STATUS, &tmp, 4);
-        uc_mem_write(MTK, MTK_TP_REG_UNK, &tmp, 4);
-    }
-
-    static u8 patch_done = 0;
-    if (!patch_done)
-    {
-        patch_done = 1;
-        moral_touch_mmi_ram_patch();
-    }
-}
-
-void mtk_touch_hook_mem_read(uint64_t address)
-{
-    (void)address;
-    mtk_touch_regs_sync();
-}
-
-void moral_touch_on_pen_down(void)
-{
-    if (MTK == NULL)
-        return;
-
-    for (unsigned bi = 0; bi < sizeof MMI_TOUCH_MAIL_BASES / sizeof MMI_TOUCH_MAIL_BASES[0]; bi++)
-    {
-        u32 base = MMI_TOUCH_MAIL_BASES[bi];
-        u16 mbox;
-
-        /*
-         * Reset _gnTouchScreenPressCount to 0 so the firmware runs its
-         * full ADC polling cycle. With the SDL_Delay in auxadc_get_result,
-         * each poll takes ~15ms, giving MOVE events time to update
-         * coordinates between polls. The firmware sees different coords
-         * across polls, enabling swipe gesture detection.
-         */
-        u32 zero = 0;
-        uc_mem_write(MTK, base - 0x34u, &zero, 4);
-
-        if (uc_mem_read(MTK, base, &mbox, 2) == UC_ERR_OK && mbox >= 200u)
-        {
-            u16 z = 0;
-            uc_mem_write(MTK, base, &z, 2);
-        }
-    }
-}
-
-void moral_touch_on_pen_move(void)
-{
-    if (MTK == NULL)
-        return;
-
-    for (unsigned bi = 0; bi < sizeof MMI_TOUCH_MAIL_BASES / sizeof MMI_TOUCH_MAIL_BASES[0]; bi++)
-    {
-        u32 base = MMI_TOUCH_MAIL_BASES[bi];
-
-        /*
-         * For move events, set the counter to threshold-1 so the firmware
-         * does exactly 1 ADC poll cycle, generating 1 MsSend with updated
-         * coordinates. This lets the firmware track drag gestures without
-         * the 16-message flood that happens when the counter is at 0.
-         */
-        u32 poll = 0;
-        uc_mem_read(MTK, base - 4u, &poll, 4);
-        if (poll == 0) poll = 60;
-        u32 threshold = (poll + 599u) / poll;
-        u32 start_cnt = (threshold > 1) ? (threshold - 1) : 0;
-        uc_mem_write(MTK, base - 0x34u, &start_cnt, 4);
     }
 }
 

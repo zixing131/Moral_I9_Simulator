@@ -46,6 +46,14 @@ struct SF_Control
 struct SF_Control SF_C_Frame;
 u8 Flash_Erase_Page[256];
 
+/*
+ * SFI 闪存写入保护：低于此阈值的地址属于代码/只读区，
+ * SFI 编程和擦除操作仅更新 FLASH_SHADOW（用于持久化），
+ * 不更新执行内存（ROM_MEMPOOL），防止覆盖正在执行的代码。
+ * 高于此阈值的地址（NVRAM/FS）正常更新执行内存以支持 XIP 读取。
+ */
+#define SFI_CODE_PROTECT_LIMIT FS_Base_Addr
+
 void handleSfiReg(uint64_t address, u32 data, uint64_t value)
 {
     switch (address)
@@ -90,7 +98,10 @@ void handleSfiReg(uint64_t address, u32 data, uint64_t value)
                 case 0x2:                                      // 写一页数据
                     changeTmp1 = SF_C_Frame.sendDataCount - 4; // 减去1cmd 3addr就是实际写入长度
                     changeTmp = ROM_ADDRESS | SF_C_Frame.address;
-                    uc_mem_write(MTK, changeTmp, SF_C_Frame.cacheData, changeTmp1);
+                    if (FLASH_SHADOW && changeTmp < 0x1000000u)
+                        memcpy(FLASH_SHADOW + changeTmp, SF_C_Frame.cacheData, changeTmp1);
+                    if (changeTmp >= SFI_CODE_PROTECT_LIMIT)
+                        uc_mem_write(MTK, changeTmp, SF_C_Frame.cacheData, changeTmp1);
                     break;
                 case 0x5:          // 读状态寄存器
                     changeTmp = 0; // 表示不忙
@@ -113,7 +124,10 @@ void handleSfiReg(uint64_t address, u32 data, uint64_t value)
                     {
                         changeTmp = ROM_ADDRESS | SF_C_Frame.address;
                         my_memset(Flash_Erase_Page, 0xff, 256);
-                        uc_mem_write(MTK, changeTmp, Flash_Erase_Page, 256);
+                        if (FLASH_SHADOW && changeTmp < 0x1000000u)
+                            memcpy(FLASH_SHADOW + changeTmp, Flash_Erase_Page, 256);
+                        if (changeTmp >= SFI_CODE_PROTECT_LIMIT)
+                            uc_mem_write(MTK, changeTmp, Flash_Erase_Page, 256);
                     }
 
                     break;

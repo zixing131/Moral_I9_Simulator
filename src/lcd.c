@@ -66,7 +66,7 @@ void lcdTaskMain()
     if (!touch_patch_called)
     {
         touch_patch_called = 1;
-        mtk_touch_regs_sync();
+        moral_touch_init_patch();
     }
 
 #if MORAL_LCD_PERIODIC_REFRESH_MS > 0
