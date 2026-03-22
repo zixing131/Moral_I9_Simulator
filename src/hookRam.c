@@ -102,7 +102,7 @@ static u32 auxadc_get_result(void)
      * Z2) and the GetX/GetYCoordination hooks use this snapshot,
      * preventing coordinate skew during the ~75ms polling window.
      */
-    if (cmd12 == 0x711u)
+    if (cmd12 == 0x711u && isTouchDown)
     {
         adc_snapshot_x = touchX < 240u ? touchX : 239u;
         adc_snapshot_y = touchY < 400u ? touchY : 399u;
@@ -589,46 +589,40 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             if (h > DE_PANEL_H) h = (u16)DE_PANEL_H;
             if (pitch == 0u) pitch = (u32)w * DE_BPP;
 
-            if (de_trigger_cnt <= 50 || (de_trigger_cnt % 50) == 0)
+            /*
+             * 计算屏幕目标坐标：如果 srcBuf 在主帧缓冲内，通过偏移推算；
+             * 否则使用固件通过代码钩子 0xc166 设置的 Lcd_Update_X/Y。
+             */
+            u16 dstX = (u16)Lcd_Update_X;
+            u16 dstY = (u16)Lcd_Update_Y;
+            if (Lcd_FullScreen_Ptr != 0 &&
+                srcBuf >= Lcd_FullScreen_Ptr &&
+                srcBuf < Lcd_FullScreen_Ptr + (u32)DE_PANEL_W * DE_PANEL_H * DE_BPP)
             {
-                printf("[DE-trigger] #%u buf=0x%x pitch=%u w=%u h=%u\n",
-                    de_trigger_cnt, srcBuf, pitch, w, h);
+                u32 off = srcBuf - Lcd_FullScreen_Ptr;
+                u32 mainPitch = (u32)DE_PANEL_W * DE_BPP;
+                dstY = (u16)(off / mainPitch);
+                dstX = (u16)((off % mainPitch) / DE_BPP);
             }
 
-            /*
-             * Tiny-region throttle (e.g. 14×14 touch cursor): on real
-             * hardware the DE DMA + LCD frame sync naturally rate-limit
-             * the cursor redraw loop.  In the emulator the DE completes
-             * instantly and the LCD IRQ triggers the ISR which starts
-             * another draw, creating a tight feedback loop.
-             *
-             * For tiny regions (≤ 20×20) we:
-             *  - set the completion status immediately (no polling delay)
-             *  - throttle the SDL blit to ~30 fps
-             *  - SKIP the LCD IRQ to break the ISR→draw→ISR loop
-             * Larger regions (buttons, panels) get full processing.
-             */
+            if (de_trigger_cnt <= 50 || (de_trigger_cnt % 50) == 0)
+            {
+                printf("[DE-trigger] #%u buf=0x%x pitch=%u w=%u h=%u dst=(%u,%u)\n",
+                    de_trigger_cnt, srcBuf, pitch, w, h, dstX, dstY);
+            }
+
             u8 is_cursor_de = (w <= 20u && h <= 20u);
 
             if (is_cursor_de)
             {
-                /*
-                 * Cursor DE: simulate DMA latency using a basic-block
-                 * counter. handleVmEvent_EMU increments the counter and
-                 * sets completion after CURSOR_DE_DELAY_BLOCKS blocks.
-                 * This prevents the cursor-redraw storm that occurs when
-                 * the DE completes instantly.
-                 */
                 cursor_de_pending = 1;
                 cursor_de_block_count = 0;
-                /* Do NOT set 0x74003148 completion yet - let the block
-                 * counter in handleVmEvent_EMU handle it */
             }
             else
             {
                 if (de_read_fb(srcBuf, pitch, w, h) == 0)
                 {
-                    de_blit_to_sdl((u16)Lcd_Update_X, (u16)Lcd_Update_Y, w, h, (u32)w * DE_BPP);
+                    de_blit_to_sdl(dstX, dstY, w, h, (u32)w * DE_BPP);
                     Lcd_Need_Update = 1;
                     De_LastTriggerTime = clock();
                     if (w >= (DE_PANEL_W - 20u) && h >= (DE_PANEL_H - 80u))
