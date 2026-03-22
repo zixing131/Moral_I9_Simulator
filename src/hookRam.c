@@ -93,19 +93,8 @@ static u32 auxadc_get_result(void)
     u32 cmd12 = auxadc_resolve_channel(auxadc_last_cmd);
     u32 result;
 
-    /*
-     * Simulate ADC conversion latency: on real hardware each ADC
-     * cycle (X→Y→Z1→Z2→X) takes a few ms due to the conversion
-     * time. In the emulator the result is instant, so the firmware's
-     * 10-poll cycle finishes in microseconds — all 10 reads see the
-     * same touchX/touchY because MOVE events haven't arrived yet.
-     *
-     * Sleep at the X-channel read (first read of each cycle). This
-     * gives the SDL main thread time to deliver MOVE events and
-     * update touchX/touchY before the next poll.
-     */
     if (cmd12 == 0x711u && isTouchDown)
-        SDL_Delay(15);
+        SDL_Delay(2);
 
     /*
      * Snapshot coordinates when the X channel is read (first channel

@@ -1025,16 +1025,16 @@ void MainUpdateTask()
          */
         lcdTaskMain();
         RtcTaskMain();
-        if (currentTime > last_gpt1_interrupt_time)
+        GptTaskMain();
+
         {
-            last_gpt1_interrupt_time = currentTime + 5;
-            timer_event_pending = 1;
+            static clock_t last_os_tick_time = 0;
+            if (currentTime > last_os_tick_time)
+            {
+                last_os_tick_time = currentTime + 5;
+                timer_event_pending = 1;
+            }
         }
-        // if (currentTime > last_gpt2_interrupt_time)
-        // {
-        //     last_gpt2_interrupt_time = currentTime + 200;
-        //     EnqueueVMEvent(VM_EVENT_Timer_IRQ, 13, 0);
-        // }
         if (currentTime > lastFlashTime)
         {
             lastFlashTime = currentTime + 300;
