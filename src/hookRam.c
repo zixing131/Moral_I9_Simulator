@@ -419,14 +419,23 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             uc_mem_write(MTK, (u32)address, &tmp, 4);
         }
         break;
-    case 0x34002C58: // DrvTimerGlobalTimerGetTick
+    case 0x34002C04: /* OS Timer counter (free-running) */
+        if (type == UC_MEM_READ)
+        {
+            static clock_t os_timer_base = 0;
+            if (os_timer_base == 0)
+                os_timer_base = clock();
+            u32 cnt = (u32)((clock() - os_timer_base) * 32768LL / CLOCKS_PER_SEC);
+            uc_mem_write(MTK, (u32)address, &cnt, 4);
+        }
+        break;
+    case 0x34002C58: /* DrvTimerGlobalTimerGetTick */
     case 0x34002C44:
         if (type == UC_MEM_READ)
         {
             DrvTimerStdaTimerGetTick += 1;
             uc_mem_write(MTK, (u32)address, &DrvTimerStdaTimerGetTick, 4);
         }
-
         break;
     case 0x3400AD14: // HalTimerUDelay
         if (type == UC_MEM_READ)

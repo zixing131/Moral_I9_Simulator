@@ -144,7 +144,11 @@ inline void handleVmEvent_EMU(uint64_t address)
         }
     }
 
-    /* 定时器中断投递：由 MainUpdateTask 设置标志，此处尝试投递 */
+    /*
+     * 定时器中断投递：由 MainUpdateTask 每 5ms 设置 timer_event_pending=1，
+     * 此处在 IRQ 自然启用的窗口中尝试投递 IRQ 14。
+     * 若 IRQ 被禁用则跳过，等待下一个 IRQ 启用的 basic block 再投递。
+     */
     if (timer_event_pending)
     {
         u32 cpsr_t;
@@ -154,7 +158,16 @@ inline void handleVmEvent_EMU(uint64_t address)
             IRQ_MASK_SET_L_Data |= (1u << 14);
             tmp = 0x20;
             uc_mem_write(MTK, 0x34002C28, &tmp, 4);
-            uc_mem_read(MTK, 0x34002C04, &halTimerCount, 4);
+            /*
+             * 0x34002C04 的 MEM_READ hook 返回基于 clock() 的模拟计数器。
+             * 直接 uc_mem_read 不触发 hook，需用同样的公式算出当前值。
+             */
+            {
+                static clock_t os_timer_base_evt = 0;
+                if (os_timer_base_evt == 0) os_timer_base_evt = clock();
+                halTimerCount = (u32)((clock() - os_timer_base_evt) * 32768LL / CLOCKS_PER_SEC);
+            }
+            uc_mem_write(MTK, 0x34002C04, &halTimerCount, 4);
             uc_mem_write(MTK, 0x34002C08, &halTimerCount, 4);
             if (StartInterrupt(14, address))
                 timer_event_pending = 0;
@@ -301,13 +314,19 @@ inline void handleVmEvent_EMU(uint64_t address)
                 }
                 break;
             case VM_EVENT_Timer_IRQ:
+            {
                 tmp = 0x20;
                 uc_mem_write(MTK, 0x34002C28, &tmp, 4);
-                uc_mem_read(MTK, 0x34002C04, &halTimerCount, 4);
+                static clock_t os_timer_base_q = 0;
+                if (os_timer_base_q == 0) os_timer_base_q = clock();
+                halTimerCount = (u32)((clock() - os_timer_base_q) * 32768LL / CLOCKS_PER_SEC);
+                uc_mem_write(MTK, 0x34002C04, &halTimerCount, 4);
                 uc_mem_write(MTK, 0x34002C08, &halTimerCount, 4);
                 IRQ_MASK_SET_L_Data |= (1u << vmEvent->r0);
-                StartInterrupt(vmEvent->r0, address);
+                if (!StartInterrupt(vmEvent->r0, address))
+                    EnqueueVMEvent(VM_EVENT_Timer_IRQ, vmEvent->r0, 0);
                 break;
+            }
             case VM_EVENT_KEYBOARD:
                 handleKeyPadVmEvent(vmEvent, address);
                 break;
@@ -335,14 +354,18 @@ inline void handleVmEvent_EMU(uint64_t address)
                 break;
             case VM_EVENT_RTC_IRQ:
                 IRQ_MASK_SET_L_Data |= (1u << DEV_IRQ_CHANNEL_RTC);
-                StartInterrupt(DEV_IRQ_CHANNEL_RTC, address);
+                if (!StartInterrupt(DEV_IRQ_CHANNEL_RTC, address))
+                    EnqueueVMEvent(VM_EVENT_RTC_IRQ, 0, 0);
                 break;
             case VM_EVENT_GPT_IRQ:
+            {
                 tmp = vmEvent->r0;
                 uc_mem_write(MTK, 0x81060010, &tmp, 4);
                 IRQ_MASK_SET_L_Data |= (1u << DEV_IRQ_CHANNEL_GPT);
-                StartInterrupt(DEV_IRQ_CHANNEL_GPT, address);
+                if (!StartInterrupt(DEV_IRQ_CHANNEL_GPT, address))
+                    EnqueueVMEvent(VM_EVENT_GPT_IRQ, vmEvent->r0, 0);
                 break;
+            }
             case VM_EVENT_EXIT:
                 uc_emu_stop(MTK);
                 break;
