@@ -15,8 +15,8 @@ u32 DrvTimerStdaTimerGetTick = 0; // DrvTimerStdaTimerGetTick
 
 u8 de_small_pending = 0;
 
-static u8 cursor_de_pending = 0;
-static clock_t cursor_de_start_time = 0;
+u8 cursor_de_pending = 0;
+u32 cursor_de_block_count = 0;
 
 u8 SPI_CMD_Buf[256];
 u32 SPI_CMD_Buf_Idx = 0;
@@ -79,17 +79,53 @@ static u32 auxadc_resolve_channel(u32 cmd)
     return cmd & 0xFFFu;
 }
 
+/*
+ * Snapshot of touch coordinates at the time of each ADC X-channel
+ * read. The GetXCoordination/GetYCoordination hooks must return
+ * these values (not the live touchX/touchY) to keep firmware's
+ * coordinate pipeline consistent.
+ */
+u32 adc_snapshot_x = 0;
+u32 adc_snapshot_y = 0;
+
 static u32 auxadc_get_result(void)
 {
     u32 cmd12 = auxadc_resolve_channel(auxadc_last_cmd);
     u32 result;
+
+    /*
+     * Simulate ADC conversion latency: on real hardware each ADC
+     * cycle (X→Y→Z1→Z2→X) takes a few ms due to the conversion
+     * time. In the emulator the result is instant, so the firmware's
+     * 10-poll cycle finishes in microseconds — all 10 reads see the
+     * same touchX/touchY because MOVE events haven't arrived yet.
+     *
+     * Sleep at the X-channel read (first read of each cycle). This
+     * gives the SDL main thread time to deliver MOVE events and
+     * update touchX/touchY before the next poll.
+     */
+    if (cmd12 == 0x711u && isTouchDown)
+        SDL_Delay(15);
+
+    /*
+     * Snapshot coordinates when the X channel is read (first channel
+     * of each ADC cycle). All subsequent reads in this cycle (Y, Z1,
+     * Z2) and the GetX/GetYCoordination hooks use this snapshot,
+     * preventing coordinate skew during the ~75ms polling window.
+     */
+    if (cmd12 == 0x711u)
+    {
+        adc_snapshot_x = touchX < 240u ? touchX : 239u;
+        adc_snapshot_y = touchY < 400u ? touchY : 399u;
+    }
+
     switch (cmd12)
     {
     case 0x711: /* X 坐标通道 */
-        result = (touchX < 240u ? touchX : 239u) * 1023u / 240u;
+        result = adc_snapshot_x * 1023u / 240u;
         break;
     case 0xB81: /* Y 坐标通道 */
-        result = (touchY < 400u ? touchY : 399u) * 1023u / 400u;
+        result = adc_snapshot_y * 1023u / 400u;
         break;
     case 0x781: /* Z1 压力通道 — 未触摸时返回 0（电路开路无电流），
                   固件 MdlTouchScreenHandle 的 LABEL_13 据此生成 pen-up */
@@ -109,7 +145,7 @@ static u32 auxadc_get_result(void)
         result = isTouchDown ? 400u : 0u;
         break;
     }
-    if (auxadc_log_count < 5)
+    if (auxadc_log_count < 30)
     {
         auxadc_log_count++;
         printf("[ADC-read] raw_cmd=0x%x eff_ch=0x%x result=%u down=%d x=%u y=%u\n",
@@ -579,17 +615,16 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             if (is_cursor_de)
             {
                 /*
-                 * Cursor DE: don't set completion immediately.
-                 * The firmware polls 0x740031A8 (HalDispReadDoneFlag).
-                 * Our hook at 0x740031A8 will return "not done" for ~2ms,
-                 * simulating real HW DMA latency and preventing the
-                 * cursor-redraw loop from running at full speed.
+                 * Cursor DE: simulate DMA latency using a basic-block
+                 * counter. handleVmEvent_EMU increments the counter and
+                 * sets completion after CURSOR_DE_DELAY_BLOCKS blocks.
+                 * This prevents the cursor-redraw storm that occurs when
+                 * the DE completes instantly.
                  */
                 cursor_de_pending = 1;
-                cursor_de_start_time = clock();
-
-                tmp = 0xF00;
-                uc_mem_write(MTK, 0x74003148u, &tmp, 4);
+                cursor_de_block_count = 0;
+                /* Do NOT set 0x74003148 completion yet - let the block
+                 * counter in handleVmEvent_EMU handle it */
             }
             else
             {
@@ -1229,14 +1264,9 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         {
             if (cursor_de_pending)
             {
-                clock_t elapsed = clock() - cursor_de_start_time;
-                if (elapsed < 2)
-                {
-                    tmp = 0;
-                    uc_mem_write(MTK, (u32)address, &tmp, 4);
-                    break;
-                }
-                cursor_de_pending = 0;
+                tmp = 0;
+                uc_mem_write(MTK, (u32)address, &tmp, 4);
+                break;
             }
             /*
              * HalDispReadDebugCSValue checks bit 6 (when 0x74003000 & 2)

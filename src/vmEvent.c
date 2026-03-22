@@ -127,6 +127,23 @@ inline void handleVmEvent_EMU(uint64_t address)
 {
     u32 tmp;
 
+    /*
+     * Cursor DE DMA delay: simulate real hardware latency using a
+     * basic-block counter. Each call to handleVmEvent_EMU is one
+     * basic block. After CURSOR_DE_DELAY_BLOCKS blocks, signal
+     * DE completion and break the cursor-redraw storm.
+     */
+    if (cursor_de_pending)
+    {
+        cursor_de_block_count++;
+        if (cursor_de_block_count >= CURSOR_DE_DELAY_BLOCKS)
+        {
+            cursor_de_pending = 0;
+            tmp = 0xF00;
+            uc_mem_write(MTK, 0x74003148u, &tmp, 4);
+        }
+    }
+
     /* 定时器中断投递：由 MainUpdateTask 设置标志，此处尝试投递 */
     if (timer_event_pending)
     {
@@ -184,41 +201,16 @@ inline void handleVmEvent_EMU(uint64_t address)
         {
             if (tevt.r0 == MR_MOUSE_MOVE)
             {
+                /*
+                 * MOVE: only update cached ADC coords. No IRQ at all.
+                 * The firmware's ongoing ADC polling cycle (started by
+                 * pen-down IRQ 31) reads these values naturally. Triggering
+                 * IRQ 29 here causes the firmware to restart its ADC state
+                 * machine, generating extra MsSend messages.
+                 */
                 touch_adc_x = (tevt.r1 >> 16) & 0xffff;
                 touch_adc_y = tevt.r1 & 0xffff;
-
-                /*
-                 * Trigger IRQ 31 (pen-detect) for MOVE events so the firmware
-                 * restarts ADC polling and reads the updated coordinates.
-                 * Without this, the firmware stops polling after the initial
-                 * pen-down cycle and can't track drag gestures (unlock swipe).
-                 */
-                u32 cpsr_chk;
-                uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_chk);
-                if (!isIRQ_Disable(cpsr_chk))
-                {
-                    IRQ_MASK_SET_L_Data |= (1u << 31);
-                    tmp = 3;
-                    uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
-                    tmp = 1;
-                    uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
-                    if (StartInterrupt(31, address))
-                    {
-                        touch_adc_pending = 1;
-                        moral_touch_on_pen_move();
-                        pending_touch_active = 0;
-                    }
-                    else
-                    {
-                        pending_touch_evt = tevt;
-                        pending_touch_active = 1;
-                    }
-                }
-                else
-                {
-                    pending_touch_evt = tevt;
-                    pending_touch_active = 1;
-                }
+                pending_touch_active = 0;
             }
             else
             {

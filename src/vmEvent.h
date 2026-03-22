@@ -42,3 +42,6 @@ vm_event *DequeueVMEvent();
 void moral_vm_touch_adc_request(u32 x, u32 y);
 
 extern volatile u8 timer_event_pending;
+extern u8 cursor_de_pending;
+extern u32 cursor_de_block_count;
+#define CURSOR_DE_DELAY_BLOCKS 3000u

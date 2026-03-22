@@ -153,17 +153,14 @@ void moral_touch_on_pen_down(void)
         u16 mbox;
 
         /*
-         * Set _gnTouchScreenPressCount close to but below the firmware
-         * threshold:  threshold = (gnPollingTime + 599) / gnPollingTime.
-         * Allow ~3 processing cycles on pen-down so the firmware gets
-         * enough coordinate samples for the initial touch position.
+         * Reset _gnTouchScreenPressCount to 0 so the firmware runs its
+         * full ADC polling cycle. With the SDL_Delay in auxadc_get_result,
+         * each poll takes ~15ms, giving MOVE events time to update
+         * coordinates between polls. The firmware sees different coords
+         * across polls, enabling swipe gesture detection.
          */
-        u32 poll = 0;
-        uc_mem_read(MTK, base - 4u, &poll, 4);
-        if (poll == 0) poll = 60;
-        u32 threshold = (poll + 599u) / poll;
-        u32 start_cnt = (threshold > 3) ? (threshold - 3) : 0;
-        uc_mem_write(MTK, base - 0x34u, &start_cnt, 4);
+        u32 zero = 0;
+        uc_mem_write(MTK, base - 0x34u, &zero, 4);
 
         if (uc_mem_read(MTK, base, &mbox, 2) == UC_ERR_OK && mbox >= 200u)
         {
