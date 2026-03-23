@@ -9,6 +9,23 @@ void handleLcdReg(uint64_t address, u32 data, uint64_t value);
 void handleTouchScreenReg(uint64_t address, u32 data, uint64_t value);
 void handleGptReg(uint64_t address, u32 data, uint64_t value);
 
+/*
+ * NC 0x20 / act 0x88988001：从 2048B page 中按连续 sector 读主数据到 DMA，并把每 sector 的 8×u16 spare 拼到 CIFD。
+ * firstSector: 0..3，sectorCount: 1..4，且 first+count<=4。
+ */
+static void nand_nc_read_page_sectors_contig(nandPage2048 *p, u32 dmaPtr, u32 firstSector, u32 sectorCount)
+{
+    u32 byteOff;
+    u32 u;
+    if (firstSector > 3u || sectorCount < 1u || sectorCount > 4u || firstSector + sectorCount > 4u)
+        return;
+    byteOff = firstSector * 512u;
+    uc_mem_write(MTK, dmaPtr, p->pageBuff + byteOff, 512u * sectorCount);
+    for (u = 0; u < 8u * sectorCount; u++)
+        nandSpareBuff[u] = p->spareBuff[firstSector * 8u + u];
+    uc_mem_write(MTK, FCIE_NC_RBUF_CIFD_BASE, nandSpareBuff, 32u * sectorCount);
+}
+
 u32 halTimerCnt = 0;              // HalTimerUDelay调用
 u32 halTimerCntMax = 0;           // HalTimerUDelay调用
 u32 DrvTimerStdaTimerGetTick = 0; // DrvTimerStdaTimerGetTick
@@ -997,93 +1014,50 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                         nandPage2048 *p = ((nandPage2048 *)NandFlashCard) + PhyRowIdx;
 
                         if (nandParamSect == 1)
-                        {
-                            // 读取page中的sec 0,cnt 1
-                            uc_mem_write(MTK, nandDmaBuffPtr, p->pageBuff, 512);
-                            for (tmp = 0; tmp < 8; tmp++)
-                            {
-                                nandSpareBuff[tmp] = p->spareBuff[tmp];
-                            }
-                            uc_mem_write(MTK, FCIE_NC_RBUF_CIFD_BASE, nandSpareBuff, 32);
-                            // printf("NC_Read_Sec0[%08x][%08x][%08x]\n", PhyRowIdx, PhyRowIdx * sizeof(nandPage2048), nandDmaBuffPtr);
-                        }
+                            nand_nc_read_page_sectors_contig(p, nandDmaBuffPtr, 0, 1);
                         else if (nandParamSect == 0x81)
-                        {
-                            // 读取page中的sec 1,cnt 1
-                            uc_mem_write(MTK, nandDmaBuffPtr, p->pageBuff + 512, 512);
-                            for (tmp = 0; tmp < 8; tmp++)
-                            {
-                                nandSpareBuff[tmp] = p->spareBuff[tmp + 8];
-                            }
-                            uc_mem_write(MTK, FCIE_NC_RBUF_CIFD_BASE, nandSpareBuff, 32);
-                            // printf("NC_Read_Sec1[%08x][%08x][%08x]\n", PhyRowIdx, PhyRowIdx * sizeof(nandPage2048), nandDmaBuffPtr);
-                        }
+                            nand_nc_read_page_sectors_contig(p, nandDmaBuffPtr, 1, 1);
                         else if (nandParamSect == 0x101)
-                        {
-                            // 读取page中的sec 2,cnt 1
-                            uc_mem_write(MTK, nandDmaBuffPtr, p->pageBuff + 512 * 2, 512);
-                            for (tmp = 0; tmp < 8; tmp++)
-                            {
-                                nandSpareBuff[tmp] = p->spareBuff[tmp + 16];
-                            }
-                            uc_mem_write(MTK, FCIE_NC_RBUF_CIFD_BASE, nandSpareBuff, 32);
-                            // printf("NC_Read_Sec2[%08x][%08x][%08x]\n", PhyRowIdx, PhyRowIdx * sizeof(nandPage2048), nandDmaBuffPtr);
-                        }
+                            nand_nc_read_page_sectors_contig(p, nandDmaBuffPtr, 2, 1);
                         else if (nandParamSect == 0x181)
-                        {
-                            // 读取page中的sec 3,cnt 1
-                            uc_mem_write(MTK, nandDmaBuffPtr, p->pageBuff + 512 * 3, 512);
-                            for (tmp = 0; tmp < 8; tmp++)
-                            {
-                                nandSpareBuff[tmp] = p->spareBuff[tmp + 24];
-                            }
-                            uc_mem_write(MTK, FCIE_NC_RBUF_CIFD_BASE, nandSpareBuff, 32);
-                            // printf("NC_Read_Sec3[%08x][%08x][%08x]\n", PhyRowIdx, PhyRowIdx * sizeof(nandPage2048), nandDmaBuffPtr);
-                        }
+                            nand_nc_read_page_sectors_contig(p, nandDmaBuffPtr, 3, 1);
                         else if (nandParamSect == 0x85)
-                        {
-                            // 读取page中的sec 1,cnt 3
-                            uc_mem_write(MTK, nandDmaBuffPtr, p->pageBuff + 512, 512 * 3);
-                            for (tmp = 0; tmp < 8 * 3; tmp++)
-                            {
-                                nandSpareBuff[tmp] = p->spareBuff[tmp + 8];
-                            }
-                            uc_mem_write(MTK, FCIE_NC_RBUF_CIFD_BASE, nandSpareBuff, 32 * 3);
-                            // printf("NC_Read_Sec123[%08x][%08x][%08x]\n", PhyRowIdx, PhyRowIdx * sizeof(nandPage2048), nandDmaBuffPtr);
-                        }
+                            nand_nc_read_page_sectors_contig(p, nandDmaBuffPtr, 1, 3);
                         else if (nandParamSect == 0x5)
-                        {
-                            // 读取page中的sec 0,cnt 3
-                            uc_mem_write(MTK, nandDmaBuffPtr, p->pageBuff, 512 * 3);
-                            for (tmp = 0; tmp < 8 * 3; tmp++)
-                            {
-                                nandSpareBuff[tmp] = p->spareBuff[tmp];
-                            }
-                            uc_mem_write(MTK, FCIE_NC_RBUF_CIFD_BASE, nandSpareBuff, 32 * 3);
-                            // printf("NC_Read_Sec012[%08x][%08x][%08x]\n", PhyRowIdx, PhyRowIdx * sizeof(nandPage2048), nandDmaBuffPtr);
-                        }
+                            nand_nc_read_page_sectors_contig(p, nandDmaBuffPtr, 0, 3);
                         else if (nandParamSect == 0x3)
+                            nand_nc_read_page_sectors_contig(p, nandDmaBuffPtr, 0, 2);
+                        else if (nandParamSect == 0x103u)
                         {
-                            // 读取page中的sec 0,cnt 2
-                            uc_mem_write(MTK, nandDmaBuffPtr, p->pageBuff, 512 * 2);
-                            for (tmp = 0; tmp < 8 * 2; tmp++)
-                            {
-                                nandSpareBuff[tmp] = p->spareBuff[tmp];
-                            }
-                            uc_mem_write(MTK, FCIE_NC_RBUF_CIFD_BASE, nandSpareBuff, 32 * 2);
-                            // printf("NC_Read_Sec012[%08x][%08x][%08x]\n", PhyRowIdx, PhyRowIdx * sizeof(nandPage2048), nandDmaBuffPtr);
+                            /*
+                             * 与 aux SectorInPage=0x200 等配对：从 page 内字节偏移处连续读 3 个 512B sector。
+                             * 无有效偏移时默认从 sector1 起（与 0x85 常见语义一致）。
+                             */
+                            u32 fs = 1u, ns = 3u;
+                            if (SectorInPage > 0u && SectorInPage <= 0x600u && (SectorInPage % 512u) == 0u)
+                                fs = SectorInPage / 512u;
+                            if (fs + ns > 4u)
+                                ns = 4u - fs;
+                            nand_nc_read_page_sectors_contig(p, nandDmaBuffPtr, fs, ns);
                         }
                         else
                         {
-                            printf("nand>>");
-                            printf("[cmd:%08x]", nandFlashCMD);
-                            printf("[sec:%08x]", SectorInPage);
-                            printf("[pidx:%08x]", PhyRowIdx);
-                            printf("[act:%08x]", act);
-                            printf("[call:%08x]\n", lastAddress);
-                            printf("unhandle nand param sec %x \n", nandParamSect);
-                            while (1)
-                                ;
+                            static u32 nand_sec_fb_log;
+                            u32 fs = 0u, ns = 1u;
+                            if (SectorInPage > 0u && SectorInPage <= 0x600u && (SectorInPage % 512u) == 0u)
+                                fs = SectorInPage / 512u;
+                            if (nandParamSect >= 2u && nandParamSect <= 4u && fs + nandParamSect <= 4u)
+                                ns = nandParamSect;
+                            else if ((nandParamSect & 0xFFu) >= 2u && (nandParamSect & 0xFFu) <= 4u &&
+                                     fs + (nandParamSect & 0xFFu) <= 4u)
+                                ns = nandParamSect & 0xFFu;
+                            if (nand_sec_fb_log < 24u)
+                            {
+                                nand_sec_fb_log++;
+                                printf("[nand] fallback cmd20 act88988001 param=0x%x SectorInPage=0x%x phy=%u -> fs=%u ns=%u\n",
+                                       nandParamSect, SectorInPage, PhyRowIdx, fs, ns);
+                            }
+                            nand_nc_read_page_sectors_contig(p, nandDmaBuffPtr, fs, ns);
                         }
                     }
                     else if (act == 0)
@@ -1109,10 +1083,13 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                     }
                     else
                     {
-                        printf("unhandle 0x20 act %x \n", act);
-                        printf("%x\n", lastAddress);
-                        while (1)
-                            ;
+                        static u32 nand_act20_warn;
+                        if (nand_act20_warn < 16u)
+                        {
+                            nand_act20_warn++;
+                            printf("[nand] unhandled cmd 0x20 act=0x%x pc=0x%x phy=%u (no data filled)\n",
+                                   act, lastAddress, PhyRowIdx);
+                        }
                     }
                 }
                 else if (nandFlashCMD == 0x19) // Read_Id
