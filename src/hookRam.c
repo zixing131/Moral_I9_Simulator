@@ -847,7 +847,12 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         }
         else
         {
-            FICE_Status = value;
+            if ((u32)value == 0u)
+                FICE_Status = 0;
+            else if (((u32)value & FICE_Status) == (u32)value)
+                FICE_Status &= ~(u32)value;
+            else
+                FICE_Status = value;
         }
         break;
     case 0x74005004: // FCIE 中断状态寄存器 NC_wait_MIULastDone
