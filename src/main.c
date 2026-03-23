@@ -1247,7 +1247,7 @@ void RunArmProgram(void *startAddr)
         uint64_t start_pc = (uint64_t)(pc & ~1u);
         if (cpsr & 0x20)
             start_pc |= 1;
-        p = uc_emu_start(MTK, start_pc, (uint64_t)-1, 1000, 0);
+        p = uc_emu_start(MTK, start_pc, (uint64_t)-1, 10000, 0);
         uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
 
         if (p != UC_ERR_OK)
@@ -1806,7 +1806,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         break;
 
     case 0x32DFA4:
-        uc_reg_write(MTK, UC_ARM_REG_R4, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R4, &tmp2);
         printf("_RtkAssertRoutine (%x)(%x)\n", tmp2, lastAddress);
         while (1)
             ;
@@ -2061,11 +2061,15 @@ bool StartInterrupt(u32 irq_line, u32 lastAddr)
         uc_reg_read(MTK, UC_ARM_REG_CPSR, &tmp);
         if (!isIRQ_Disable(tmp))
         {
-            // printf("Start IRQ %x\n", irq_line);
+            u32 cur_mode = tmp & 0x1F;
+            if (cur_mode == 0x12 || cur_mode == 0x11)
+                return false;
+
             tmp2 = (tmp & 0xFFFFFFE0) | 0x12; // IRQ模式
             tmp2 = tmp2 | 0xC0;               // IRQ/FIQ Disable
             uc_reg_write(MTK, UC_ARM_REG_CPSR, &tmp2);
             uc_reg_write(MTK, UC_ARM_REG_SPSR, &tmp);
+
             tmp = lastAddr + 4;
             uc_reg_write(MTK, UC_ARM_REG_LR, &tmp);
             uc_mem_write(MTK, IRQ_Status, &irq_line, 4);
