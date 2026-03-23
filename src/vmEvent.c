@@ -3,9 +3,20 @@
 #define MAX_VM_EVENT_COUNT 512
 #define MAX_VM_EVENT_WAIT_COUNT 512
 
-extern u32 aux_irq_en;
-extern u32 aux_irq_sts;
-extern volatile u8 pen_detect_pending;
+static u8 touch_adc_pending = 0;
+static u32 touch_adc_x = 0;
+static u32 touch_adc_y = 0;
+static u8 touch_irq_pending = 0;
+
+static vm_event pending_touch_evt;
+static u8 pending_touch_active = 0;
+
+void moral_vm_touch_adc_request(u32 x, u32 y)
+{
+    touch_adc_pending = 1;
+    touch_adc_x = x;
+    touch_adc_y = y;
+}
 
 u32 keyRowIdx = 0;
 u32 keyColIdx = 0;
@@ -38,6 +49,8 @@ int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
             {
                 if (VmEventCount >= MAX_VM_EVENT_COUNT)
                     break;
+                if (VmEventHandleWaitList[i].event == VM_EVENT_TOUCH_SCREEN_IRQ)
+                    touch_irq_pending = 1;
                 VmEventHandleList[VmEventCount++] = VmEventHandleWaitList[i];
             }
             VmEventWaitCount = 0;
@@ -45,17 +58,21 @@ int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
             evt->event = event;
             evt->r0 = r0;
             evt->r1 = r1;
+            if (event == VM_EVENT_TOUCH_SCREEN_IRQ)
+                touch_irq_pending = 1;
             vmIsLock = 0;
         }
         else
         {
-                if (VmEventWaitCount < MAX_VM_EVENT_WAIT_COUNT)
-                {
-                    vm_event *evt = &VmEventHandleWaitList[VmEventWaitCount++];
-                    evt->event = event;
-                    evt->r0 = r0;
-                    evt->r1 = r1;
-                }
+            if (VmEventWaitCount < MAX_VM_EVENT_WAIT_COUNT)
+            {
+                vm_event *evt = &VmEventHandleWaitList[VmEventWaitCount++];
+                evt->event = event;
+                evt->r0 = r0;
+                evt->r1 = r1;
+                if (event == VM_EVENT_TOUCH_SCREEN_IRQ)
+                    touch_irq_pending = 1;
+            }
             else
                 printf("WARNING:Max VmEventWaitCount\n");
         }
@@ -104,101 +121,138 @@ inline vm_event *DequeueVMEvent()
 
 uint64_t handleTick;
 
-volatile u8 timer_event_pending = 0;
-volatile u8 soft_timer_event_pending = 0;
-volatile u8 irq13_chained = 0;
+static u32 timer_irq_channel = 14;
 
 inline void handleVmEvent_EMU(uint64_t address)
 {
     u32 tmp;
 
-    /*
-     * Cursor DE DMA delay: simulate real hardware latency using a
-     * basic-block counter. Each call to handleVmEvent_EMU is one
-     * basic block. After CURSOR_DE_DELAY_BLOCKS blocks, signal
-     * DE completion and break the cursor-redraw storm.
-     */
-    if (cursor_de_pending)
+    /* 重投递上次失败的 Timer IRQ */
+    if (timer_irq_pending)
     {
-        cursor_de_block_count++;
-        if (cursor_de_block_count >= CURSOR_DE_DELAY_BLOCKS)
+        if (StartInterrupt(timer_irq_channel, address))
         {
-            cursor_de_pending = 0;
-            tmp = 0xF00;
-            uc_mem_write(MTK, 0x74003148u, &tmp, 4);
-        }
-    }
-
-    /*
-     * 定时器中断投递：由 MainUpdateTask 每 5ms 设置 timer_event_pending=1，
-     * 此处在 IRQ 自然启用的窗口中尝试投递 IRQ 14。
-     * 若 IRQ 被禁用则跳过，等待下一个 IRQ 启用的 basic block 再投递。
-     */
-    if (timer_event_pending)
-    {
-        u32 cpsr_t;
-        uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_t);
-        if (!isIRQ_Disable(cpsr_t))
-        {
-            IRQ_MASK_SET_L_Data |= (1u << 14);
             tmp = 0x20;
             uc_mem_write(MTK, 0x34002C28, &tmp, 4);
-            {
-                static clock_t os_timer_base_evt = 0;
-                if (os_timer_base_evt == 0) os_timer_base_evt = clock();
-                halTimerCount = (u32)((clock() - os_timer_base_evt) * 32768LL / CLOCKS_PER_SEC);
-            }
-            uc_mem_write(MTK, 0x34002C04, &halTimerCount, 4);
-            uc_mem_write(MTK, 0x34002C08, &halTimerCount, 4);
-            if (StartInterrupt(14, address))
-            {
-                timer_event_pending = 0;
-                /*
-                 * IRQ 13 (Rtk10TimeSoftHandler) 通过固件 HalCommonIntHandler
-                 * 循环链式投递，避免嵌套中断导致 SPSR/T-bit 损坏。
-                 * 设置掩码位和队列标记，hookRam 的 IRQ 清除钩子会在
-                 * IRQ 14 处理完毕后将 IRQ 13 号码写入应答寄存器。
-                 */
-                if (soft_timer_event_pending)
-                {
-                    IRQ_MASK_SET_L_Data |= (1u << 13);
-                    uc_mem_write(MTK, 0x3400181C, &IRQ_MASK_SET_L_Data, 4);
-                    irq13_chained = 1;
-                    soft_timer_event_pending = 0;
-                }
-            }
+
+            timer_irq_pending = 0;
+            return;
         }
     }
 
-    /*
-     * Pen detect 硬件级触发：
-     * SDL 线程设置 pen_detect_pending=1（DOWN 事件），
-     * 此处将 AUX_IRQ_STS bit0 置位并在 IRQ 使能时触发 IRQ 31。
-     * 固件的 HalTSPenDetIrqHandler 自然检查 IRQ_STS & IRQ_EN，
-     * 之后通过消息链触发 ADC 读取，完全走硬件路径。
-     */
-    if (pen_detect_pending)
+    /* 触摸 DOWN/UP/MOVE 事件优先处理，先触发 pen-detect IRQ 31 */
+    if (pending_touch_active || (touch_irq_pending && VmEventCount > 0 && vmIsLock == 0))
     {
-        aux_irq_sts |= 1;
-        uc_mem_write(MTK, 0x3400C1C4u, &aux_irq_sts, 4);
+        vm_event tevt;
+        u8 have_evt = 0;
 
-        if (aux_irq_en & 1)
+        if (pending_touch_active)
+        {
+            tevt = pending_touch_evt;
+            have_evt = 1;
+        }
+        else
+        {
+            touch_irq_pending = 0;
+            u32 i;
+            for (i = 0; i < VmEventCount; i++)
+            {
+                if (VmEventHandleList[i].event == VM_EVENT_TOUCH_SCREEN_IRQ)
+                {
+                    tevt = VmEventHandleList[i];
+                    u32 j;
+                    VmEventCount--;
+                    for (j = i; j < VmEventCount; j++)
+                        VmEventHandleList[j] = VmEventHandleList[j + 1];
+                    have_evt = 1;
+                    for (j = i; j < VmEventCount; j++)
+                    {
+                        if (VmEventHandleList[j].event == VM_EVENT_TOUCH_SCREEN_IRQ)
+                        {
+                            touch_irq_pending = 1;
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+            (void)have_evt;
+        }
+
+        if (have_evt)
         {
             u32 cpsr_chk;
             uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr_chk);
             if (!isIRQ_Disable(cpsr_chk))
             {
                 IRQ_MASK_SET_L_Data |= (1u << 31);
+                if (tevt.r0 == MR_MOUSE_UP)
+                {
+                    tmp = 0;
+                    uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
+                    uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+                }
+                else
+                {
+                    tmp = 3;
+                    uc_mem_write(MTK, 0x3400C1BC, &tmp, 4);
+                    tmp = 1;
+                    uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+                }
                 if (StartInterrupt(31, address))
                 {
-                    pen_detect_pending = 0;
-                    auxadc_log_count = 0;
+                    u32 rawX = (tevt.r1 >> 16) & 0xffff;
+                    u32 rawY = tevt.r1 & 0xffff;
+                    if (rawX == 0 && rawY == 0)
+                    {
+                        rawX = touchX;
+                        rawY = touchY;
+                    }
+                    touch_adc_pending = 1;
+                    touch_adc_x = rawX;
+                    touch_adc_y = rawY;
+                    pending_touch_active = 0;
+                    if (tevt.r0 == MR_MOUSE_DOWN)
+                    {
+                        moral_touch_on_pen_down();
+                        auxadc_log_count = 0;
+                        mssend_pop_log = 0;
+                    }
+                    else if (tevt.r0 == MR_MOUSE_MOVE)
+                    {
+                        moral_touch_on_pen_down();
+                    }
                 }
+                else
+                {
+                    pending_touch_evt = tevt;
+                    pending_touch_active = 1;
+                }
+            }
+            else
+            {
+                pending_touch_evt = tevt;
+                pending_touch_active = 1;
             }
         }
     }
 
-    if (handleTick++ > 100)
+    /* ADC 触摸坐标：始终写入寄存器供固件轮询，IRQ 可用时额外触发 IRQ 29 加速响应 */
+    if (touch_adc_pending)
+    {
+        u32 ax = touch_adc_x, ay = touch_adc_y;
+        tmp = ay * 1023u / 400u;
+        uc_mem_write(MTK, 0x3400C1C8, &tmp, 4);
+        tmp = ax * 1023u / 240u;
+        uc_mem_write(MTK, 0x3400C1C0, &tmp, 4);
+        tmp = isTouchDown ? 2 : 0;
+        uc_mem_write(MTK, 0x3400C1C4, &tmp, 4);
+
+        if (StartInterrupt(29, address))
+            touch_adc_pending = 0;
+    }
+
+    if (handleTick++ > 1000)
     {
         handleTick = 0;
         vmEvent = DequeueVMEvent();
@@ -213,25 +267,10 @@ inline void handleVmEvent_EMU(uint64_t address)
                     // printf("requeue mie %x\n", FICE_Status);
                 }
                 break;
-            case VM_EVENT_Timer_IRQ:
-            {
-                tmp = 0x20;
-                uc_mem_write(MTK, 0x34002C28, &tmp, 4);
-                static clock_t os_timer_base_q = 0;
-                if (os_timer_base_q == 0) os_timer_base_q = clock();
-                halTimerCount = (u32)((clock() - os_timer_base_q) * 32768LL / CLOCKS_PER_SEC);
-                uc_mem_write(MTK, 0x34002C04, &halTimerCount, 4);
-                uc_mem_write(MTK, 0x34002C08, &halTimerCount, 4);
-                IRQ_MASK_SET_L_Data |= (1u << vmEvent->r0);
-                if (!StartInterrupt(vmEvent->r0, address))
-                    EnqueueVMEvent(VM_EVENT_Timer_IRQ, vmEvent->r0, 0);
-                break;
-            }
             case VM_EVENT_KEYBOARD:
                 handleKeyPadVmEvent(vmEvent, address);
                 break;
             case VM_EVENT_LCD_IRQ:
-                IRQ_MASK_SET_H_Data |= (1u << 19);
                 if (StartInterrupt(19 + 32, address))
                 {
                     tmp = 0xf << 8;
@@ -241,7 +280,7 @@ inline void handleVmEvent_EMU(uint64_t address)
                 }
                 break;
             case VM_EVENT_DMA_IRQ:
-                IRQ_MASK_SET_H_Data |= (1u << 23);
+                // 位于高32位中断
                 if (StartInterrupt(23 + 32, address))
                 {
                     tmp = 0xffffffff;
@@ -253,19 +292,15 @@ inline void handleVmEvent_EMU(uint64_t address)
             case VM_EVENT_TOUCH_SCREEN_IRQ:
                 break;
             case VM_EVENT_RTC_IRQ:
-                IRQ_MASK_SET_L_Data |= (1u << DEV_IRQ_CHANNEL_RTC);
-                if (!StartInterrupt(DEV_IRQ_CHANNEL_RTC, address))
-                    EnqueueVMEvent(VM_EVENT_RTC_IRQ, 0, 0);
+                /* 时间已在 RtcTaskMain() 里 Update_RTC_Time()；此处只投递中断。
+                 * 若掩码未就绪则不再反复入队，避免占满事件队列。 */
+                StartInterrupt(DEV_IRQ_CHANNEL_RTC, address);
                 break;
             case VM_EVENT_GPT_IRQ:
-            {
                 tmp = vmEvent->r0;
                 uc_mem_write(MTK, 0x81060010, &tmp, 4);
-                IRQ_MASK_SET_L_Data |= (1u << DEV_IRQ_CHANNEL_GPT);
-                if (!StartInterrupt(DEV_IRQ_CHANNEL_GPT, address))
-                    EnqueueVMEvent(VM_EVENT_GPT_IRQ, vmEvent->r0, 0);
+                StartInterrupt(DEV_IRQ_CHANNEL_GPT, address);
                 break;
-            }
             case VM_EVENT_EXIT:
                 uc_emu_stop(MTK);
                 break;

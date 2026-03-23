@@ -26,7 +26,3 @@ bool gpt1Circle;
 bool gpt2Circle;
 uint64_t gpt1Tout;
 uint64_t gpt2Tout;
-u32 gpt1Prescaler;
-u32 gpt2Prescaler;
-
-void GptTaskMain(void);

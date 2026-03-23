@@ -352,8 +352,6 @@ void keyEvent(int type, int key)
     }
 }
 
-extern volatile u8 pen_detect_pending;
-
 void mouseEvent(int type, int x, int y)
 {
     if (x < 0)
@@ -366,17 +364,25 @@ void mouseEvent(int type, int x, int y)
         y = 399;
     touchX = (u32)x;
     touchY = (u32)y;
-
     if (type == MR_MOUSE_DOWN)
-    {
         isTouchDown = 1;
-        pen_detect_pending = 1;
-    }
     else if (type == MR_MOUSE_UP)
-    {
         isTouchDown = 0;
+
+    moral_vm_touch_adc_request((u32)x, (u32)y);
+
+    if (type == MR_MOUSE_MOVE)
+    {
+        static clock_t last_move_enqueue = 0;
+        clock_t now = clock();
+        clock_t min_iv = (clock_t)(CLOCKS_PER_SEC / 30);
+        if (min_iv < 1)
+            min_iv = 1;
+        if (last_move_enqueue != 0 && (now - last_move_enqueue) < min_iv)
+            return;
+        last_move_enqueue = now;
     }
-    /* MOVE: touchX/touchY 已更新，固件 ADC 轮询时自然获取新坐标 */
+    EnqueueVMEvent(VM_EVENT_TOUCH_SCREEN_IRQ, type, (x << 16) | y);
 }
 
 void loop()
@@ -620,16 +626,10 @@ void saveFlashFile()
     FILE *FLASH_File_Handle = fopen(FLASH_IMG_TEMP_PATH, "wb");
     if (FLASH_File_Handle == NULL)
         return;
-    char *tmp;
-    if (FLASH_SHADOW)
+    char *tmp = SDL_malloc(size_16mb);
+    if (tmp == NULL)
+        return;
     {
-        tmp = (char *)FLASH_SHADOW;
-    }
-    else
-    {
-        tmp = SDL_malloc(size_16mb);
-        if (tmp == NULL)
-            return;
         const size_t low_n = (size_t)GUEST_LOW_IMAGE_MAP_SIZE;
         size_t xr = (size_t)size_16mb - low_n;
         if (xr > (size_t)GUEST_IDA_XRAM_SIZE)
@@ -653,8 +653,6 @@ void saveFlashFile()
         printf("删除Flash文件失败");
         printf("errno = %d\n", errno);
     }
-    if (!FLASH_SHADOW)
-        SDL_free(tmp);
     if (rename(FLASH_IMG_TEMP_PATH, FLASH_IMG_PATH) != 0)
         printf("重命名flash_tmp失败");
     return;
@@ -685,10 +683,7 @@ void initMtkSimalator()
     ROM2_MEMPOOL = SDL_malloc(size_32mb);
 
     /* 勿映射满 16MB：须留出 0x00D00000 给 IDA XRAM，否则与触摸/MMI 全局量冲突 → err 11 */
-    /* 真实硬件中闪存是只读的（只能通过 SFI 控制器编程），
-     * 映射为 R+X 防止固件野指针 store 指令覆盖代码。
-     * uc_mem_write (host API) 不受此限制，hook/patch 仍可写入。 */
-    err = uc_mem_map_ptr(MTK, ROM_ADDRESS, GUEST_LOW_IMAGE_MAP_SIZE, UC_PROT_READ | UC_PROT_EXEC, ROM_MEMPOOL);
+    err = uc_mem_map_ptr(MTK, ROM_ADDRESS, GUEST_LOW_IMAGE_MAP_SIZE, UC_PROT_ALL, ROM_MEMPOOL);
     //??
     err = uc_mem_map_ptr(MTK, 0x8000000, size_32mb, UC_PROT_ALL, ROM2_MEMPOOL);
     //??
@@ -772,35 +767,36 @@ void initMtkSimalator()
         static uc_hook code_hooks[32];
         int hi = 0;
         static const u32 hook_ranges[][2] = {
-            {0xA144,    0xA145},     /* pin config */
-            {0xCD44,    0xCD45},     /* LCD params */
-            {0x13C4,    0x13C5},     /* HalTouchScreenEnable */
-            {0x1E574,   0x1E575},    /* HalDispTransAddr */
-            {0x2AE1C,   0x2AE1D},    /* ker_assert */
-            {0x2C55E,   0x2C55F},    /* DrvDMA2DIsHWBitBlt */
-            {0x2C5DC,   0x2C5DD},    /* DrvDMA2DIsHWFillRect */
-            {0x2CB28,   0x2CB29},    /* DrvDMA2DCmdFinish */
-            {0x2D5ECA,  0x2D5ECB},   /* uart_print */
-            {0x31B9C,   0x31B9D},    /* RTC seconds hook */
-            {0x1A605C,  0x1A605D},   /* ker_assert_func */
-            {0x1D4B96,  0x1D4B97},   /* nand_translate_DMA */
-            {0x1ED480,  0x1ED481},   /* _RtkExceptionRoutine */
-            {0x1FE99C,  0x1FE99D},   /* LOG_SD */
-            {0x2196D0,  0x2196D1},   /* MdlTouchScreenStatusReport */
-            {0x2198A8,  0x2198A9},   /* MdlTouchScreenHandle */
-            {0x21A196,  0x21A197},   /* MdlTouchScreenConfigure */
-            {0x30F34A,  0x30F34B},   /* dev_accGetLCDStatus */
-            {0x32DFA4,  0x32DFA5},   /* _RtkAssertRoutine */
-            {0x36ED44,  0x36ED45},   /* fatal error check */
-            {0x3B5A00,  0x3B5A01},   /* KER_VTRACE */
-            {0x3B5A52,  0x3B5A53},   /* ker_trace */
-            {0x3B5BA4,  0x3B5BA5},   /* fatal error check */
-            {0x3B5C54,  0x3B5C55},   /* KER error */
-            {0x7C322C,  0x7C3238},   /* skip mrc instructions */
-            {0x800160C, 0x800160D},  /* KER error high addr */
-            {0x1C007160,0x1C007161}, /* KER error high addr */
+            {0xA144, 0xA145},         /* pin config */
+            {0xCD44, 0xCD45},         /* LCD params */
+            {0x1E574, 0x1E575},       /* HalDispTransAddr */
+            {0x2AE1C, 0x2AE1D},       /* ker_assert */
+            {0x2C55E, 0x2C55F},       /* DrvDMA2DIsHWBitBlt */
+            {0x2C5DC, 0x2C5DD},       /* DrvDMA2DIsHWFillRect */
+            {0x2CB28, 0x2CB29},       /* DrvDMA2DCmdFinish */
+            {0x2D5ECA, 0x2D5ECB},     /* uart_print */
+            {0x31B9C, 0x31B9D},       /* RTC seconds hook */
+            {0x1A605C, 0x1A605D},     /* ker_assert_func */
+            {0x1D4B96, 0x1D4B97},     /* nand_translate_DMA */
+            {0x1ED480, 0x1ED481},     /* _RtkExceptionRoutine */
+            {0x1FE99C, 0x1FE99D},     /* LOG_SD */
+            {0x219712, 0x219713},     /* MdlTouchScreenStatusReport MsSend return */
+            {0x219848, 0x219849},     /* _MdlTouchscreenGetYCoordination */
+            {0x219878, 0x219879},     /* _MdlTouchscreenGetXCoordination */
+            {0x219DF0, 0x219DF1},     /* _MdlTouchscreenRepeatADCProcess MsSend return */
+            {0x30F34A, 0x30F34B},     /* dev_accGetLCDStatus */
+            {0x32DFA4, 0x32DFA5},     /* _RtkAssertRoutine */
+            {0x34D236, 0x34D237},     /* MsSend POP */
+            {0x36ED44, 0x36ED45},     /* fatal error check */
+            {0x3B5A00, 0x3B5A01},     /* KER_VTRACE */
+            {0x3B5A52, 0x3B5A53},     /* ker_trace */
+            {0x3B5BA4, 0x3B5BA5},     /* fatal error check */
+            {0x3B5C54, 0x3B5C55},     /* KER error */
+            {0x7C322C, 0x7C3238},     /* skip mrc instructions */
+            {0x800160C, 0x800160D},   /* KER error high addr */
+            {0x1C007160, 0x1C007161}, /* KER error high addr */
         };
-        for (u32 ri = 0; ri < sizeof(hook_ranges)/sizeof(hook_ranges[0]); ri++)
+        for (u32 ri = 0; ri < sizeof(hook_ranges) / sizeof(hook_ranges[0]); ri++)
         {
             err = uc_hook_add(MTK, &code_hooks[hi++], UC_HOOK_CODE,
                               hookCodeCallBack, 0,
@@ -815,14 +811,14 @@ void initMtkSimalator()
         static uc_hook mem_hooks[16];
         int mi = 0;
         static const u32 mem_ranges[][2] = {
-            {0x34000000, 0x3400FFFF},  /* MTK 外设寄存器 (IRQ/Timer/UART/AUXADC) */
-            {0x74000000, 0x74006FFF},  /* DE/DMA/FCIE/SPI */
-            {0x81060000, 0x810600FF},  /* GPT */
-            {0x82050000, 0x82050FFF},  /* AUX 触摸 */
-            {0x90000000, 0x90000FFF},  /* LCD 控制器 */
-            {0x00D00000, 0x00D0FFFF},  /* XRAM 全局量 (RF config) */
+            {0x34000000, 0x3400FFFF}, /* MTK 外设寄存器 (IRQ/Timer/UART/AUXADC) */
+            {0x74000000, 0x74006FFF}, /* DE/DMA/FCIE/SPI */
+            {0x81060000, 0x810600FF}, /* GPT */
+            {0x82050000, 0x82050FFF}, /* AUX 触摸 */
+            {0x90000000, 0x90000FFF}, /* LCD 控制器 */
+            {0x00D00000, 0x00D0FFFF}, /* XRAM 全局量 (RF config) */
         };
-        for (u32 ri = 0; ri < sizeof(mem_ranges)/sizeof(mem_ranges[0]); ri++)
+        for (u32 ri = 0; ri < sizeof(mem_ranges) / sizeof(mem_ranges[0]); ri++)
         {
             uc_hook_add(MTK, &mem_hooks[mi++], UC_HOOK_MEM_READ,
                         hookRamCallBack, 0,
@@ -836,14 +832,6 @@ void initMtkSimalator()
     err = uc_hook_add(MTK, &trace, UC_HOOK_MEM_READ_UNMAPPED, hookRamErrorBack, 2, 0, 0xFFFFFFFF);
     err = uc_hook_add(MTK, &trace, UC_HOOK_MEM_WRITE_UNMAPPED, hookRamErrorBack, 3, 0, 0xFFFFFFFF);
     err = uc_hook_add(MTK, &trace, UC_HOOK_MEM_FETCH_UNMAPPED, hookRamErrorBack, 4, 0, 0xFFFFFFFF);
-
-    {
-        static uc_hook rom_wp_hook;
-        extern bool hookRomWriteProtect(uc_engine *, uc_mem_type, uint64_t, uint32_t, int64_t, u32);
-        err = uc_hook_add(MTK, &rom_wp_hook, UC_HOOK_MEM_WRITE_PROT,
-                          hookRomWriteProtect, 0,
-                          ROM_ADDRESS, (uint64_t)(ROM_ADDRESS + GUEST_LOW_IMAGE_MAP_SIZE - 1));
-    }
 
     err = uc_hook_add(MTK, &trace, UC_HOOK_INSN_INVALID, hookInsnInvalid, 4, 0, 0xFFFFFFFF);
 
@@ -1038,17 +1026,25 @@ void MainUpdateTask()
          */
         lcdTaskMain();
         RtcTaskMain();
-        GptTaskMain();
-
+        if (currentTime > last_gpt1_interrupt_time)
         {
-            static clock_t last_os_tick_time = 0;
-            if (currentTime > last_os_tick_time)
+            last_gpt1_interrupt_time = currentTime + 1;
+            halTimerCnt++;
+            if (halTimerCnt >= halTimerOutLength)
             {
-                last_os_tick_time = currentTime + 5;
-                timer_event_pending = 1;
-                soft_timer_event_pending = 1;
+                halTimerCnt = 0;
+                if (halTimerIntStatus == 1)
+                {
+                    timer_irq_pending = 1;
+                    // printf("进入定时中断\n");
+                }
             }
         }
+        // if (currentTime > last_gpt2_interrupt_time)
+        // {
+        //     last_gpt2_interrupt_time = currentTime + 200;
+        //     EnqueueVMEvent(VM_EVENT_Timer_IRQ, 13, 0);
+        // }
         if (currentTime > lastFlashTime)
         {
             lastFlashTime = currentTime + 300;
@@ -1187,25 +1183,6 @@ int main(int argc, char *args[])
         if (SD_File_Handle == NULL)
             printf("没有SD卡镜像文件，跳过加载\n");
 
-        ROM_PRISTINE = SDL_malloc((size_t)GUEST_LOW_IMAGE_MAP_SIZE);
-        if (ROM_PRISTINE)
-            memcpy(ROM_PRISTINE, ROM_MEMPOOL, (size_t)GUEST_LOW_IMAGE_MAP_SIZE);
-
-        FLASH_SHADOW = SDL_malloc((size_t)size_16mb);
-        if (FLASH_SHADOW)
-        {
-            memcpy(FLASH_SHADOW, ROM_MEMPOOL, (size_t)GUEST_LOW_IMAGE_MAP_SIZE);
-            if (s_ida_xram_host)
-                memcpy(FLASH_SHADOW + (size_t)GUEST_LOW_IMAGE_MAP_SIZE,
-                       s_ida_xram_host, (size_t)GUEST_IDA_XRAM_SIZE);
-
-            uc_err map_err = uc_mem_map_ptr(MTK, 0x68000000, size_16mb, UC_PROT_ALL, FLASH_SHADOW);
-            if (map_err != UC_ERR_OK)
-                printf("[mem] map 0x68000000 SFI XIP err %u (%s)\n", map_err, uc_strerror(map_err));
-            else
-                printf("[mem] Mapped 0x68000000 SFI XIP Bank1 -> FLASH_SHADOW\n");
-        }
-
         // 启动emu线程
         pthread_create(&emu_thread, NULL, RunArmProgram, ROM_ADDRESS);
         pthread_create(&screen_render_thread, NULL, MainUpdateTask, NULL);
@@ -1307,6 +1284,21 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     // }
 
     /*
+     * 触摸 MsSend 返回点（IDA ARM 地址，Thumb 时 PC 可能 +1）：
+     * 219712: MdlTouchScreenStatusReport 内 BL MsSend 后的 CMP R0,#10
+     * 219df0: _MdlTouchscreenRepeatADCProcess 内 BL MsSend 后的 CMP R0,#10
+     */
+    if (((u32)address & ~1u) == 0x219712u || ((u32)address & ~1u) == 0x219df0u)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        if (tmp1 != 10u)
+        {
+            tmp1 = 10u;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        }
+    }
+
+    /*
      * dev_accGetLCDStatus @0x30f34a（Thumb）：读 main_LCD_Sleep；模拟器 RAM 未镜像时易判「关屏」，
      * _MdlTouchScreenDoMainJob 不走 DrvTsGetAdcData，触摸栈空转。直接返回 1。
      */
@@ -1346,8 +1338,63 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
 
     /* HalDispSWFMarkTrigger/HalDispReset logging removed for performance */
 
+    /*
+     * 绕过固件触摸屏校准转换，直接返回 SDL 屏幕坐标。
+     * 固件校准公式依赖 NVRAM 中的校准数据（X/Y offset+scale），在模拟器中
+     * 这些值可能为零或与模拟器的 ADC 映射不匹配，导致坐标全部错误。
+     */
+    if (((u32)address & ~1u) == 0x219878u) /* _MdlTouchscreenGetXCoordination */
+    {
+        tmp1 = touchX;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp2);
+        uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
+    }
+    if (((u32)address & ~1u) == 0x219848u) /* _MdlTouchscreenGetYCoordination */
+    {
+        tmp1 = touchY;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp2);
+        uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
+    }
+
     switch (address)
     {
+    /*
+     * MsSend @0x34d236：POP {R4-R6,PC}，RtkSend 返回后 R4=邮箱 R5=消息指针。
+     * 触摸上报包：byte0=50，offset2 半字=52，offset6 半字=17233（MdlTouchScreenStatusReport / RepeatADC）。
+     * 模拟器里 RtkSend 常非 10，导致 UI 收不到触摸；仅对触摸包强制 RTK 成功码 10。
+     */
+    case 0x34d236:
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R4, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R5, &tmp3);
+        if (tmp3 >= 0x1000u && tmp3 < 0xF0000000u)
+        {
+            u8 hdr[8];
+            if (uc_mem_read(MTK, tmp3, hdr, sizeof hdr) == UC_ERR_OK)
+            {
+                u16 w2 = (u16)hdr[2] | ((u16)hdr[3] << 8);
+                u16 w6 = (u16)hdr[6] | ((u16)hdr[7] << 8);
+                if (hdr[0] == 50u && w2 == 52u && w6 == 17233u)
+                {
+                    if (mssend_pop_log < 20)
+                    {
+                        mssend_pop_log++;
+                        printf("[TS-DBG] MsSend-POP: real_R0=%u mbox=%u (touch msg)\n", tmp1, tmp2);
+                    }
+                    if (tmp1 != 10u)
+                    {
+                        printf("[TS-DBG] MsSend-POP: FORCING R0 from %u to 10!\n", tmp1);
+                        tmp1 = 10;
+                        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+                    }
+                }
+            }
+        }
+        break;
+    }
     // case 0x41BF4:
     //     printf("HalPagingSpiBusTransactionStart %x\n", lastAddress);
     //     break;
@@ -1397,86 +1444,6 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         uc_reg_read(MTK, UC_ARM_REG_R2, &Lcd_Update_W);
         uc_reg_read(MTK, UC_ARM_REG_R3, &Lcd_Update_H);
         break;
-    case 0x13c4: /* HalTouchScreenEnable entry (Thumb) */
-    {
-        /*
-         * 固件用 gTouchScreenPendetMailbox==0xFF 判断「未初始化」，
-         * 0xFF 时才调用 HalTouchScreenInit 注册 IRQ 31/29 handler
-         * 并设置 pfnTSPenDetUserIsr。
-         * CRT BSS 清零会把它变成 0 → 永远跳过初始化。
-         * 在此强制写回 0xFF，确保 HalTouchScreenInit 一定执行。
-         */
-        u8 val = 0xFF;
-        uc_mem_write(MTK, 0xD00140u, &val, 1);
-        break;
-    }
-    case 0x2198a8: /* MdlTouchScreenHandle entry (Thumb) */
-    {
-        /*
-         * byte_D0919A(订阅标志) 和 gtTouchScreenSusbribeData(邮箱)
-         * 是 .data 段的 CRT scatter-load 变量，若 CRT 未正确复制
-         * 则为 0，MdlTouchScreenStatusReport 不会被调用。
-         * 在此保证值正确。
-         */
-        {
-            u8  sf = 0;
-            u16 mb = 0;
-            uc_mem_read(MTK, 0xD0919Au, &sf, 1);
-            uc_mem_read(MTK, 0xD09198u, &mb, 2);
-            if (sf == 0) {
-                sf = 1;
-                uc_mem_write(MTK, 0xD0919Au, &sf, 1);
-            }
-            if (mb == 0 || mb == 0xFFFF) {
-                mb = 0x34;
-                uc_mem_write(MTK, 0xD09198u, &mb, 2);
-            }
-        }
-        static u8 ts_handle_log = 0;
-        if (ts_handle_log < 20) {
-            u32 z1v, z2v, xloc, yloc;
-            u8  sf; u16 mb;
-            uc_mem_read(MTK, 0xD091B8u, &z1v, 4);
-            uc_mem_read(MTK, 0xD091BCu, &z2v, 4);
-            uc_mem_read(MTK, 0xD0917Cu, &xloc, 4);
-            uc_mem_read(MTK, 0xD09180u, &yloc, 4);
-            uc_mem_read(MTK, 0xD0919Au, &sf, 1);
-            uc_mem_read(MTK, 0xD09198u, &mb, 2);
-            printf("[TS-HANDLE] Z1=%u Z2=%u gX=%u gY=%u subFlag=%u mbox=0x%X\n",
-                   z1v, z2v, xloc, yloc, sf, mb);
-            ts_handle_log++;
-        }
-        break;
-    }
-    case 0x2196d0: /* MdlTouchScreenStatusReport entry (Thumb) */
-    {
-        static u8 ts_report_log = 0;
-        if (ts_report_log < 20) {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            printf("[TS-REPORT] StatusReport called! r0=0x%X r1=0x%X\n", tmp1, tmp2);
-            ts_report_log++;
-        }
-        break;
-    }
-    case 0x21a196: /* MdlTouchScreenConfigure entry (Thumb) */
-    {
-        /*
-         * 固件初始化触摸系统时调用此函数设置 gnPollingTime。
-         * 在此之后重新应用校准补丁，确保 CRT 不会覆盖我们的值。
-         */
-        static u8 ts_cfg_done = 0;
-        if (!ts_cfg_done) {
-            ts_cfg_done = 1;
-            u32 v;
-            v = 0;    uc_mem_write(MTK, 0xD0F3D8u, &v, 4);
-            v = 961;  uc_mem_write(MTK, 0xD0F3DCu, &v, 4);
-            v = 0;    uc_mem_write(MTK, 0xD0F3E0u, &v, 4);
-            v = 1602; uc_mem_write(MTK, 0xD0F3E4u, &v, 4);
-            printf("[touch-hook] calibration patched after MdlTouchScreenConfigure\n");
-        }
-        break;
-    }
     // case 0x1A6E70:
     //     tmp2 = 1;
     //     uc_reg_write(MTK, UC_ARM_REG_R3, &tmp2);
@@ -1569,9 +1536,9 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         if ((tmp1 & 0x110000) != 0)
         {
-            static u32 kwarn3_cnt = 0;
-            if (kwarn3_cnt++ < 10)
-                printf("[KER_WARN3] R0:%x (pc:%x)\n", tmp1, lastAddress);
+            printf("fatal error3: %x \n", lastAddress);
+            while (1)
+                ;
         }
         break;
     // case 0x12E92:
@@ -1708,14 +1675,18 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     case 0x1C007160:
     case 0x3B5C54:
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        if ((tmp1 & 0x110000) != 0)
+        {
+            printf("fatal error2: %x \n", lastAddress);
+            while (1)
+                ;
+        }
         {
             static u32 kerr_cnt = 0;
             kerr_cnt++;
             if (kerr_cnt <= 30)
             {
-                if ((tmp1 & 0x110000) != 0)
-                    printf("[KER_WARN] R0:%x (pc:%x)\n", tmp1, lastAddress);
-                else if (tmp1 == 0xc34 || tmp1 == 0x10034 || tmp1 == 0x34)
+                if (tmp1 == 0xc34 || tmp1 == 0x10034 || tmp1 == 0x34)
                 {
                     uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
                     uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
@@ -1771,16 +1742,15 @@ bool StartInterrupt(u32 irq_line, u32 lastAddr)
         uc_reg_read(MTK, UC_ARM_REG_CPSR, &tmp);
         if (!isIRQ_Disable(tmp))
         {
+            // printf("Start IRQ %x\n", irq_line);
             tmp2 = (tmp & 0xFFFFFFE0) | 0x12; // IRQ模式
-            tmp2 &= ~(1u << 5);               // 清除 T 位 (强制 ARM 模式执行 ISR 向量)
-            tmp2 |= 0xC0;                     // IRQ/FIQ Disable
+            tmp2 = tmp2 | 0xC0;               // IRQ/FIQ Disable
             uc_reg_write(MTK, UC_ARM_REG_CPSR, &tmp2);
             uc_reg_write(MTK, UC_ARM_REG_SPSR, &tmp);
             tmp = lastAddr + 4;
             uc_reg_write(MTK, UC_ARM_REG_LR, &tmp);
             uc_mem_write(MTK, IRQ_Status, &irq_line, 4);
             uc_reg_write(MTK, UC_ARM_REG_PC, &Interrupt_Handler_Entry);
-            uc_ctl_remove_cache(MTK, (uint64_t)lastAddr, (uint64_t)(lastAddr + 4));
             return true;
         }
     }

@@ -1,6 +1,6 @@
 #include "keypad.h"
 
-void SimulatePressKey(u8 key, u8 is_press)
+void SimulateMstarPressKey(u8 key, u8 is_press)
 {
     if (key >= MSTAR_KEY_MAP_SIZE)
         return;
@@ -34,9 +34,8 @@ inline void handleKeyPadVmEvent(vm_event *vmEvent, uint64_t address)
         static u32 kpd_log = 0;
         kpd_log++;
         /* Key table dump removed for performance */
-        SimulatePressKey(key, press);
+        SimulateMstarPressKey(key, press);
         if (!StartInterrupt(KPD_IRQ_LINE, address))
             EnqueueVMEvent(vmEvent->event, vmEvent->r0, vmEvent->r1);
     }
 }
-

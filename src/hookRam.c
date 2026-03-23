@@ -13,12 +13,9 @@ u32 halTimerCnt = 0;              // HalTimerUDelay调用
 u32 halTimerCntMax = 0;           // HalTimerUDelay调用
 u32 DrvTimerStdaTimerGetTick = 0; // DrvTimerStdaTimerGetTick
 
-extern volatile u8 irq13_chained;
-
 u8 de_small_pending = 0;
 
-u8 cursor_de_pending = 0;
-u32 cursor_de_block_count = 0;
+static clock_t cursor_de_last_draw = 0;
 
 u8 SPI_CMD_Buf[256];
 u32 SPI_CMD_Buf_Idx = 0;
@@ -51,22 +48,12 @@ u32 LCD_CMD_Data = 0;
 
 /*
  * AUX ADC 触摸采样模拟。
- * 固件通过写 0x3400C184 (AUX_CON1) 选择 ADC 通道，再读 0x3400C198 (AUX_DAT) 取 10-bit 结果。
- * 通道命令：0x711 → X，0xB81 → Y，0x781 → Z1，0x7B1 → Z2
- *
- * AUX IRQ 寄存器（基址 0x3400C180）：
- *   +0x38 (0x3400C1B8) AUX_IRQ_CLR  — 写1清除对应中断状态
- *   +0x3C (0x3400C1BC) AUX_IRQ_EN   — bit0=pen detect, bit1=ADC done
- *   +0x44 (0x3400C1C4) AUX_IRQ_STS  — bit0=pen detect pending, bit1=ADC done pending
+ * 固件通过写 0x3400C184 选择 ADC 通道，再读 0x3400C198 取 10-bit 结果。
+ * 通道命令：0x711 → X，0xB81 → Y，其余 → 压力值
  */
 static u32 auxadc_last_cmd = 0;
 
 static u8 auxadc_log_count = 0;
-
-/* AUX IRQ 硬件寄存器状态 */
-u32 aux_irq_en  = 0;
-u32 aux_irq_sts = 0;
-volatile u8 pen_detect_pending = 0;
 
 /* 固件写入值可能在不同位域带通道号，取多种切片与已知通道表匹配 */
 static u32 auxadc_resolve_channel(u32 cmd)
@@ -91,50 +78,17 @@ static u32 auxadc_resolve_channel(u32 cmd)
     return cmd & 0xFFFu;
 }
 
-/*
- * Snapshot of touch coordinates, taken once per touch-down event.
- * Both ADC reads in a cycle (location + resistance) return the
- * same snapshot values, preventing the firmware's consistency
- * check (|temp1 - temp2| <= 16) from failing due to mouse movement.
- */
-u32 adc_snapshot_x = 0;
-u32 adc_snapshot_y = 0;
-static u8 adc_snapshot_done = 0;
-
 static u32 auxadc_get_result(void)
 {
     u32 cmd12 = auxadc_resolve_channel(auxadc_last_cmd);
     u32 result;
-
-    if (cmd12 == 0x711u && isTouchDown)
-        SDL_Delay(2);
-
-    if (!isTouchDown)
-        adc_snapshot_done = 0;
-
-    /*
-     * Snapshot coordinates once per ADC cycle (location + resistance).
-     * The first X-channel read (0x711) of each cycle takes a fresh
-     * snapshot. The flag is cleared after the YR-channel read (0x191)
-     * which ends the resistance phase, allowing the next cycle to
-     * pick up updated mouse coordinates during a drag.
-     */
-    if (cmd12 == 0x711u && isTouchDown && !adc_snapshot_done)
-    {
-        adc_snapshot_x = touchX < 240u ? touchX : 239u;
-        adc_snapshot_y = touchY < 400u ? touchY : 399u;
-        adc_snapshot_done = 1;
-    }
-    if (cmd12 == 0x191u)
-        adc_snapshot_done = 0;
-
     switch (cmd12)
     {
     case 0x711: /* X 坐标通道 */
-        result = adc_snapshot_x * 1023u / 240u;
+        result = (touchX < 240u ? touchX : 239u) * 1023u / 240u;
         break;
     case 0xB81: /* Y 坐标通道 */
-        result = adc_snapshot_y * 1023u / 400u;
+        result = (touchY < 400u ? touchY : 399u) * 1023u / 400u;
         break;
     case 0x781: /* Z1 压力通道 — 未触摸时返回 0（电路开路无电流），
                   固件 MdlTouchScreenHandle 的 LABEL_13 据此生成 pen-up */
@@ -154,7 +108,7 @@ static u32 auxadc_get_result(void)
         result = isTouchDown ? 400u : 0u;
         break;
     }
-    if (auxadc_log_count < 30)
+    if (auxadc_log_count < 5)
     {
         auxadc_log_count++;
         printf("[ADC-read] raw_cmd=0x%x eff_ch=0x%x result=%u down=%d x=%u y=%u\n",
@@ -165,7 +119,7 @@ static u32 auxadc_get_result(void)
 
 #define DE_PANEL_W 240u
 #define DE_PANEL_H 400u
-#define DE_BPP     2u
+#define DE_BPP 2u
 
 /*
  * 简单直接：从 Lcd_Buffer_Ptr 按 Lcd_Update_Pitch（字节行距）整块或逐行读到 Lcd_Cache_Buffer，
@@ -207,7 +161,7 @@ static void de_blit_rgb565_to_surface(SDL_Surface *sfc, u8 *srcBuf, u16 dstX, u1
             {
                 u16 color = srcRow[xi];
                 SDL_PutPixel32(sfc, dstX + xi, dstY + yi,
-                    SDL_MapRGB(sfc->format, (u8)PIXEL565R(color), (u8)PIXEL565G(color), (u8)PIXEL565B(color)));
+                               SDL_MapRGB(sfc->format, (u8)PIXEL565R(color), (u8)PIXEL565G(color), (u8)PIXEL565B(color)));
             }
         }
     }
@@ -439,39 +393,50 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             uc_mem_write(MTK, (u32)address, &tmp, 4);
         }
         break;
-    case 0x34002C04: /* OS Timer counter (free-running) */
-        if (type == UC_MEM_READ)
-        {
-            static clock_t os_timer_base = 0;
-            if (os_timer_base == 0)
-                os_timer_base = clock();
-            u32 cnt = (u32)((clock() - os_timer_base) * 32768LL / CLOCKS_PER_SEC);
-            uc_mem_write(MTK, (u32)address, &cnt, 4);
-        }
-        break;
-    case 0x34002C58: /* DrvTimerGlobalTimerGetTick */
+    // case 0x34002C58: // DrvTimerGlobalTimerGetTick
     case 0x34002C44:
         if (type == UC_MEM_READ)
         {
-            DrvTimerStdaTimerGetTick += 1;
+            DrvTimerStdaTimerGetTick++;
             uc_mem_write(MTK, (u32)address, &DrvTimerStdaTimerGetTick, 4);
         }
+
         break;
-    case 0x3400AD14: // HalTimerUDelay
-        if (type == UC_MEM_READ)
-        {
-            value = (1 << 9);
-            uc_mem_write(MTK, (u32)address, &value, 4);
-        }
-        break;
-    // case 0x34002C08: // DrvTimerOstickGetCount
-    //     if (type == UC_MEM_WRITE)
+        // 不启用硬件定时器
+    // case 0x3400AD14: // HalTimerUDelay
+    //     if (type == UC_MEM_READ)
     //     {
-    //         halTimerCount = value;
-    //         printf("write tickCount\n");
-    //         while(1);
+    //         value = (1 << 9);
+    //         uc_mem_write(MTK, (u32)address, &value, 4);
     //     }
     //     break;
+    case 0x34002C04:
+        if (type == UC_MEM_WRITE)
+        {
+            halTimerOutLength = value & 0xffffff;
+            // printf("下一个定时长度：%x\n", halTimerOutLength);
+        }
+        break;
+    case 0x34002C08: // DrvTimerOstickGetCount
+        if (type == UC_MEM_READ)
+        {
+            uc_mem_write(MTK, address, &halTimerCnt, 4);
+        }
+        break;
+    case 0x34002C2C:
+        if (type == UC_MEM_WRITE) // 写入0x10允许中断
+        {
+            if ((value & 0x10) == 0x10)
+                halTimerIntStatus = 1;
+        }
+        break;
+    case 0x34002C34:
+        if (type == UC_MEM_WRITE) // 写入0x10禁止中断
+        {
+            if ((value & 0x10) == 0x10)
+                halTimerIntStatus = 0;
+        }
+        break;
     case 0x34002c00: // 定时器计数,最大2047,请勿继续改动这里
         if (type == UC_MEM_READ)
         {
@@ -605,44 +570,73 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 }
             }
 
-            if (w > DE_PANEL_W) w = (u16)DE_PANEL_W;
-            if (h > DE_PANEL_H) h = (u16)DE_PANEL_H;
-            if (pitch == 0u) pitch = (u32)w * DE_BPP;
+            if (w > DE_PANEL_W)
+                w = (u16)DE_PANEL_W;
+            if (h > DE_PANEL_H)
+                h = (u16)DE_PANEL_H;
+            if (pitch == 0u)
+                pitch = (u32)w * DE_BPP;
+
+            if (de_trigger_cnt <= 20 || (de_trigger_cnt % 100) == 0)
+            {
+                printf("[DE-trigger] #%u buf=0x%x pitch=%u w=%u h=%u\n",
+                       de_trigger_cnt, srcBuf, pitch, w, h);
+            }
 
             /*
-             * 计算屏幕目标坐标：如果 srcBuf 在主帧缓冲内，通过偏移推算；
-             * 否则使用固件通过代码钩子 0xc166 设置的 Lcd_Update_X/Y。
+             * Tiny-region throttle (e.g. 14×14 touch cursor): on real
+             * hardware the DE DMA + LCD frame sync naturally rate-limit
+             * the cursor redraw loop.  In the emulator the DE completes
+             * instantly and the LCD IRQ triggers the ISR which starts
+             * another draw, creating a tight feedback loop.
+             *
+             * For tiny regions (≤ 20×20) we:
+             *  - set the completion status immediately (no polling delay)
+             *  - throttle the SDL blit to ~30 fps
+             *  - SKIP the LCD IRQ to break the ISR→draw→ISR loop
+             * Larger regions (buttons, panels) get full processing.
              */
-            u16 dstX = (u16)Lcd_Update_X;
-            u16 dstY = (u16)Lcd_Update_Y;
-            if (Lcd_FullScreen_Ptr != 0 &&
-                srcBuf >= Lcd_FullScreen_Ptr &&
-                srcBuf < Lcd_FullScreen_Ptr + (u32)DE_PANEL_W * DE_PANEL_H * DE_BPP)
-            {
-                u32 off = srcBuf - Lcd_FullScreen_Ptr;
-                u32 mainPitch = (u32)DE_PANEL_W * DE_BPP;
-                dstY = (u16)(off / mainPitch);
-                dstX = (u16)((off % mainPitch) / DE_BPP);
-            }
-
-            if (de_trigger_cnt <= 50 || (de_trigger_cnt % 50) == 0)
-            {
-                printf("[DE-trigger] #%u buf=0x%x pitch=%u w=%u h=%u dst=(%u,%u)\n",
-                    de_trigger_cnt, srcBuf, pitch, w, h, dstX, dstY);
-            }
-
             u8 is_cursor_de = (w <= 20u && h <= 20u);
 
             if (is_cursor_de)
             {
-                cursor_de_pending = 1;
-                cursor_de_block_count = 0;
+                /*
+                 * Simulate real hardware DE DMA latency for tiny regions.
+                 * On real HW the DMA takes ~1 ms; without this delay the
+                 * firmware's cursor-redraw loop spins thousands of times
+                 * per second, starving every other RTOS task.
+                 *
+                 * We sleep until at least 16 ms (~60 fps) have elapsed
+                 * since the last cursor draw.  SDL_Delay yields the
+                 * emulator thread so the main (SDL event) thread keeps
+                 * running; when we wake we set the completion status and
+                 * the firmware proceeds normally.
+                 */
+                clock_t min_interval = (clock_t)(CLOCKS_PER_SEC / 60);
+                if (min_interval < 1)
+                    min_interval = 1;
+
+                while (cursor_de_last_draw != 0 &&
+                       (clock() - cursor_de_last_draw) < min_interval)
+                {
+                    SDL_Delay(1);
+                }
+                cursor_de_last_draw = clock();
+
+                if (de_read_fb(srcBuf, pitch, w, h) == 0)
+                {
+                    de_blit_to_sdl((u16)Lcd_Update_X, (u16)Lcd_Update_Y, w, h, (u32)w * DE_BPP);
+                    Lcd_Need_Update = 1;
+                }
+
+                tmp = 0xF00;
+                uc_mem_write(MTK, 0x74003148u, &tmp, 4);
             }
             else
             {
                 if (de_read_fb(srcBuf, pitch, w, h) == 0)
                 {
-                    de_blit_to_sdl(dstX, dstY, w, h, (u32)w * DE_BPP);
+                    de_blit_to_sdl((u16)Lcd_Update_X, (u16)Lcd_Update_Y, w, h, (u32)w * DE_BPP);
                     Lcd_Need_Update = 1;
                     De_LastTriggerTime = clock();
                     if (w >= (DE_PANEL_W - 20u) && h >= (DE_PANEL_H - 80u))
@@ -1271,23 +1265,18 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             uc_mem_write(MTK, (u32)address, &value, 4);
         }
         break;
-    case 0x740031A8: // lcd HalDispReadDebugCSValue / HalDispReadDoneFlag
+    case 0x740031A8: // lcd HalDispReadDebugCSValue
         if (type == UC_MEM_READ)
         {
-            if (cursor_de_pending)
-            {
-                tmp = 0;
-                uc_mem_write(MTK, (u32)address, &tmp, 4);
-                break;
-            }
-            /*
-             * HalDispReadDebugCSValue checks bit 6 (when 0x74003000 & 2)
-             * or bit 7 (otherwise). We must set BOTH bits so the firmware's
-             * HalDispBusyLoop sees "done" on the first poll, avoiding a
-             * 3000-iteration busy-wait that starves the RTOS scheduler.
-             */
             uc_mem_read(MTK, 0x74003000, &value, 4);
-            value |= 0x1C0; /* bits 6, 7, 8 */
+            if ((value & 2) != 0)
+            {
+                value |= 384;
+            }
+            else
+            {
+                value |= 384;
+            }
             uc_mem_write(MTK, (u32)address, &value, 4);
         }
         break;
@@ -1348,28 +1337,20 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     case 0x34001854: // 中断清除
         if (type == UC_MEM_WRITE)
         {
-            IRQ_MASK_SET_L_Data &= (~value);
-            uc_mem_write(MTK, 0x3400181C, &IRQ_MASK_SET_L_Data, 4);
-            if (irq13_chained && (value & (1u << 14)) && (IRQ_MASK_SET_L_Data & (1u << 13)))
-            {
-                u32 next = (13u << 2);
-                uc_mem_write(MTK, 0x34001840, &next, 4);
-                irq13_chained = 0;
-            }
-            else
-            {
-                value = 0x1fc;
-                uc_mem_write(MTK, 0x34001840, &value, 4);
-            }
+            // IRQ_MASK_SET_L_Data &= (~value);
+            // uc_mem_write(MTK, 0x3400181C, &IRQ_MASK_SET_L_Data, 4);
+            value = 0x1fc; // 设置中断号码大于等于0x40退出中断?
+            uc_mem_write(MTK, 0x34001840, &value, 4);
+            // printf("清除中断掩码:%x\n", value);
         }
         break;
     case 0x34001858: // 中断清除
         if (type == UC_MEM_WRITE)
         {
-            IRQ_MASK_SET_H_Data &= (~value);
+            // IRQ_MASK_SET_H_Data &= (~value);
+            // uc_mem_write(MTK, 0x34001820, &IRQ_MASK_SET_H_Data, 4);
             value = 0x1fc; // 设置中断号码大于等于0x40退出中断?
             uc_mem_write(MTK, 0x34001840, &value, 4);
-            uc_mem_write(MTK, 0x34001820, &IRQ_MASK_SET_H_Data, 4);
             //            printf("Clear Pending Irq %x\n", value);
         }
         break;
@@ -1377,14 +1358,14 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                      // 0x3400187c
         if (type == UC_MEM_WRITE)
         {
-            IRQ_MASK_SET_L_Data |= value;
+            IRQ_MASK_SET_L_Data = value;
         }
         break;
     case 0x34001820: // HalIntcMask 32-63中断掩码
                      // 0x34001880
         if (type == UC_MEM_WRITE)
         {
-            IRQ_MASK_SET_H_Data |= value;
+            IRQ_MASK_SET_H_Data = value;
             // printf("写H中断掩码:%x\n", value);
         }
         break;
@@ -1453,20 +1434,13 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     //     }
     //     break;
     default:
-        if (address >= 0x90000000 && address < 0x90001000)
-            handleLcdReg(address, data, value);
-        else if (address >= 0x82050000 && address < 0x82051000)
-            handleTouchScreenReg(address, data, value);
-        else if (address >= 0x3400C080u && address < 0x3400C400u)
+        if (address >= 0x3400C080u && address < 0x3400C400u)
         {
+            /* 触摸 AUXADC：命令可能在 C180~C18C，数据读或为半字/字节 */
             if (type == UC_MEM_WRITE && address == 0x3400C184u)
-            {
-                /* AUX_CON1: ADC 通道/转换参数 */
                 auxadc_last_cmd = (u32)value;
-            }
             else if (type == UC_MEM_READ && address == 0x3400C198u)
             {
-                /* AUX_DAT: 10-bit ADC 转换结果 */
                 tmp = auxadc_get_result();
                 if (size >= 4)
                     uc_mem_write(MTK, (u32)address, &tmp, 4);
@@ -1481,31 +1455,9 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                     uc_mem_write(MTK, (u32)address, &b, 1);
                 }
             }
-            else if (type == UC_MEM_WRITE && address == 0x3400C1BCu)
+            else if (type == UC_MEM_READ)
             {
-                /* AUX_IRQ_EN: 中断使能寄存器 */
-                u32 old_en = aux_irq_en;
-                aux_irq_en = (u32)value;
-                /* 固件重新使能 pen detect 且有挂起状态 → 标记待触发 IRQ 31 */
-                if (!(old_en & 1) && (aux_irq_en & 1) && (aux_irq_sts & 1))
-                    pen_detect_pending = 1;
-            }
-            else if (type == UC_MEM_READ && address == 0x3400C1BCu)
-            {
-                /* AUX_IRQ_EN: 返回当前使能状态 */
-                uc_mem_write(MTK, 0x3400C1BCu, &aux_irq_en, 4);
-            }
-            else if (type == UC_MEM_WRITE && address == 0x3400C1B8u)
-            {
-                /* AUX_IRQ_CLR: 写1清除对应中断状态位 */
-                u32 clr = (u32)value;
-                aux_irq_sts &= ~clr;
-                uc_mem_write(MTK, 0x3400C1C4u, &aux_irq_sts, 4);
-            }
-            else if (type == UC_MEM_READ && address == 0x3400C1C4u)
-            {
-                /* AUX_IRQ_STS: 返回当前中断状态 */
-                uc_mem_write(MTK, 0x3400C1C4u, &aux_irq_sts, 4);
+                mtk_touch_hook_mem_read(address);
             }
         }
         else if (address >= 0x81060000 && address < 0x81060100)
@@ -1514,24 +1466,9 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         break;
     }
 }
-bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
+void hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
 {
     printf("地址无法访问:%x\n", address);
-    return false;
-}
-
-bool hookRomWriteProtect(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
-{
-    u32 pc;
-    uc_reg_read(uc, UC_ARM_REG_PC, &pc);
-    static u8 rom_wp_log = 0;
-    if (rom_wp_log < 30)
-    {
-        rom_wp_log++;
-        printf("[ROM-WP] blocked write 0x%x size=%u val=0x%x from pc=0x%x\n",
-               (u32)address, size, (u32)value, pc);
-    }
-    return true;
 }
 
 bool hookInsnInvalid(uc_engine *uc, void *user_data)
@@ -1548,25 +1485,10 @@ bool hookInsnInvalid(uc_engine *uc, void *user_data)
     {
         printf("mrc指令:%x\n", insn);
     }
-    else if (ROM_PRISTINE && pc < GUEST_LOW_IMAGE_MAP_SIZE)
-    {
-        u32 pristine_insn;
-        memcpy(&pristine_insn, ROM_PRISTINE + pc, 4);
-        if (pristine_insn != insn)
-        {
-            u32 page_start = pc & ~0xFFu;
-            u32 page_end = page_start + 256;
-            if (page_end > GUEST_LOW_IMAGE_MAP_SIZE)
-                page_end = GUEST_LOW_IMAGE_MAP_SIZE;
-            printf("[ROM-REPAIR] pc=0x%x page=[0x%x-0x%x]\n", pc, page_start, page_end);
-            uc_mem_write(MTK, page_start, ROM_PRISTINE + page_start, page_end - page_start);
-            uc_ctl_remove_cache(MTK, (uint64_t)page_start, (uint64_t)page_end);
-            return true;
-        }
-        printf("指令无效:%x\n", insn);
-    }
     else
         printf("指令无效:%x\n", insn);
+    // 返回true继续
+    // 返回false停止
 
     return 0;
 }

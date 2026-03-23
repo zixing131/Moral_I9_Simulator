@@ -5,6 +5,20 @@ u32 touchX;
 u32 touchY;
 u32 isInitTouch;
 
+/* 与 vmEvent.c 中触摸中断写入保持一致，便于固件轮询 0x3400C1xx */
+#define MTK_TP_REG_STATUS 0x3400C1BCu
+#define MTK_TP_REG_Z    0x3400C1C4u
+#define MTK_TP_REG_X      0x3400C1C0u
+#define MTK_TP_REG_Y      0x3400C1C8u
+
+/*
+ * IDA MCP：段名 XRAM @0x00D00000，_gtTouchScreenSusbribeData 线性地址 0xD09198（即 0x00D09198）。
+ * 不是 0x0D000000+0x9198（那是 218MB 带，与 scatter 无关）。
+ */
+static const u32 MMI_TOUCH_MAIL_BASES[] = {
+    0xD09198u,
+};
+
 /*
  * 校准地址（IDA XRAM 段）：
  * _gtCalibrationInfo @ 0xD0F3D8  —  X offset
@@ -35,32 +49,13 @@ static void moral_touch_calibration_patch(void)
     v = 1602; uc_mem_write(MTK, CALIB_Y_SCALE_ADDR,  &v, 4);
 }
 
-/*
- * IDA MCP：段名 XRAM @0x00D00000，_gtTouchScreenSusbribeData 线性地址 0xD09198。
- */
-/*
- * 触摸订阅数据 _gtTouchScreenSusbribeData @ 0xD09198：
- *   +0 (u16) 邮箱 ID = 0x34 (52)
- *   +2 (u8)  订阅标志 byte_D0919A = 1
- * IDA 中无静态写交叉引用，但 IDB 快照确认运行时必须为这些值。
- * 固件可能通过 CRT scatter-load 或间接指针初始化。
- */
-#define TOUCH_SUBSCRIBE_ADDR     0xD09198u
-#define TOUCH_SUBSCRIBE_FLAG     0xD0919Au
-#define TOUCH_SUBSCRIBE_MAILBOX  0x34u
-
-static const u32 MMI_TOUCH_MAIL_BASES[] = {
-    TOUCH_SUBSCRIBE_ADDR,
-};
-
-/*
- * 一次性初始化补丁：校准参数 + 固件环境安全修复。
- * 不再修改 PressCount、邮箱等运行时状态（固件自行管理）。
- */
-void moral_touch_init_patch(void)
+static void moral_touch_mmi_ram_patch(void)
 {
     u8 one = 1;
+    u8 ts_mode = 1;
     u32 zero32 = 0;
+    u32 poll_ok = 60u;
+    unsigned bi;
 
     if (MTK == NULL)
         return;
@@ -68,55 +63,116 @@ void moral_touch_init_patch(void)
     moral_touch_calibration_patch();
 
     /*
-     * _gtTouchScreenSusbribeData: MdlTouchScreenHandle 需要
-     * byte_D0919A != 0 且 gtTouchScreenSusbribeData != 255
-     * 才会通过 MdlTouchScreenStatusReport 发送触摸事件。
-     */
-    {
-        u16 cur_mbox = 0;
-        u8  cur_flag = 0;
-        uc_mem_read(MTK, TOUCH_SUBSCRIBE_ADDR, &cur_mbox, 2);
-        uc_mem_read(MTK, TOUCH_SUBSCRIBE_FLAG, &cur_flag, 1);
-        if (cur_flag == 0)
-        {
-            u8 flag = 1;
-            uc_mem_write(MTK, TOUCH_SUBSCRIBE_FLAG, &flag, 1);
-            printf("[touch-patch] set subscribe flag @ 0x%X = 1\n", TOUCH_SUBSCRIBE_FLAG);
-        }
-        if (cur_mbox == 0 || cur_mbox == 0xFF)
-        {
-            u16 mbox = (u16)TOUCH_SUBSCRIBE_MAILBOX;
-            uc_mem_write(MTK, TOUCH_SUBSCRIBE_ADDR, &mbox, 2);
-            printf("[touch-patch] set subscriber mailbox @ 0x%X = 0x%X\n",
-                   TOUCH_SUBSCRIBE_ADDR, TOUCH_SUBSCRIBE_MAILBOX);
-        }
-    }
-
-    /*
      * bLCDisOn @ 0xD007F8: DispUpdateScreenMdl 通过 DrvLcdCheckPowerStatus
      * 检查此变量，为 0 则跳过 DrvLcdUpdate，导致触摸后 DE trigger 不触发。
      */
     uc_mem_write(MTK, 0xD007F8u, &one, 1);
 
+    for (bi = 0; bi < sizeof MMI_TOUCH_MAIL_BASES / sizeof MMI_TOUCH_MAIL_BASES[0]; bi++)
+    {
+        u32 base = MMI_TOUCH_MAIL_BASES[bi];
+        u16 mbox;
+        u32 poll;
+        /* +2 byte_D0919A，+4 gReEnableTouchScreenFlag（相对邮箱半字） */
+        if (uc_mem_write(MTK, base + 2u, &one, 1) != UC_ERR_OK)
+            continue;
+        uc_mem_write(MTK, base + 4u, &zero32, 1);
+        if (uc_mem_read(MTK, base, &mbox, 2) == UC_ERR_OK && mbox == 255u)
+        {
+            u16 z = 0;
+            uc_mem_write(MTK, base, &z, 2);
+        }
+        /*
+         * _gnTsPrMode @ 0xd09156 = base - 0x42：DoMainJob 需 LCD 开或 gnTsPrMode==1 才走触摸 ADC
+         * _gnTouchScreenPressCount @ 0xd09164 = base - 0x34：过大时 LABEL_27 直接 return，永不 MsSend
+         * _gnPollingTime @ 0xd09194 = base - 4：为 0 或未初始化除法会崩；过大时 (T+599)/T==1 一次上报后即被屏蔽
+         */
+        uc_mem_write(MTK, base - 0x42u, &ts_mode, 1);
+        uc_mem_write(MTK, base - 0x34u, &zero32, 4);
+        if (uc_mem_read(MTK, base - 4u, &poll, 4) == UC_ERR_OK && (poll == 0u || poll > 5000u))
+            uc_mem_write(MTK, base - 4u, &poll_ok, 4);
+        /* 按压时清释放计数，避免卡在释放状态机 */
+        if (isTouchDown)
+            uc_mem_write(MTK, base - 0x0cu, &zero32, 4);
+    }
+}
+
+void mtk_touch_regs_sync(void)
+{
+    u32 tmp;
+    if (MTK == NULL)
+        return;
+    u32 sx = touchX;
+    u32 sy = touchY;
+    if (sx >= 240u)
+        sx = 239u;
+    if (sy >= 400u)
+        sy = 399u;
+
+    tmp = sx * 1023u / 240u;
+    uc_mem_write(MTK, MTK_TP_REG_X, &tmp, 4);
+    tmp = sy * 1023u / 400u;
+    uc_mem_write(MTK, MTK_TP_REG_Y, &tmp, 4);
+
+    if (isTouchDown)
+    {
+        tmp = 3;
+        uc_mem_write(MTK, MTK_TP_REG_STATUS, &tmp, 4);
+        tmp = 1;
+        uc_mem_write(MTK, MTK_TP_REG_Z, &tmp, 4);
+    }
+    else
+    {
+        tmp = 0;
+        uc_mem_write(MTK, MTK_TP_REG_STATUS, &tmp, 4);
+        uc_mem_write(MTK, MTK_TP_REG_Z, &tmp, 4);
+    }
+
+    static u8 patch_done = 0;
+    if (!patch_done)
+    {
+        patch_done = 1;
+        moral_touch_mmi_ram_patch();
+    }
+}
+
+void mtk_touch_hook_mem_read(uint64_t address)
+{
+    (void)address;
+    mtk_touch_regs_sync();
+}
+
+void moral_touch_on_pen_down(void)
+{
+    if (MTK == NULL)
+        return;
+
     for (unsigned bi = 0; bi < sizeof MMI_TOUCH_MAIL_BASES / sizeof MMI_TOUCH_MAIL_BASES[0]; bi++)
     {
         u32 base = MMI_TOUCH_MAIL_BASES[bi];
-        u8 ts_mode = 1;
-        u32 poll_ok = 60u;
-        u32 poll;
+        u16 mbox;
 
         /*
-         * _gnTsPrMode @ base - 0x42：DoMainJob 需 LCD 开或 gnTsPrMode==1 才走触摸 ADC。
-         * 模拟器中 LCD 状态可能不准，强制设为 1。
+         * Set _gnTouchScreenPressCount close to but below the firmware
+         * threshold:  threshold = (gnPollingTime + 599) / gnPollingTime.
+         * By setting the counter to (threshold - 2) instead of 0, the
+         * touch handler is allowed only ~2 processing cycles per event,
+         * preventing the 20-message flood seen when the counter is reset
+         * to 0 (the emulator's instant ADC lets the handler loop rapidly).
          */
-        uc_mem_write(MTK, base - 0x42u, &ts_mode, 1);
+        u32 poll_time = 0;
+        uc_mem_read(MTK, base - 4u, &poll_time, 4);
+        if (poll_time == 0u || poll_time > 5000u)
+            poll_time = 60u;
+        u32 threshold = (poll_time + 599u) / poll_time;
+        u32 press_cnt = (threshold > 2u) ? (threshold - 2u) : 0u;
+        uc_mem_write(MTK, base - 0x34u, &press_cnt, 4);
 
-        /*
-         * _gnPollingTime @ base - 4：为 0 时固件除法崩溃；过大时触摸不灵敏。
-         * 仅在无效时设安全默认值。
-         */
-        if (uc_mem_read(MTK, base - 4u, &poll, 4) == UC_ERR_OK && (poll == 0u || poll > 5000u))
-            uc_mem_write(MTK, base - 4u, &poll_ok, 4);
+        if (uc_mem_read(MTK, base, &mbox, 2) == UC_ERR_OK && mbox >= 200u)
+        {
+            u16 z = 0;
+            uc_mem_write(MTK, base, &z, 2);
+        }
     }
 }
 

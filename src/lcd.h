@@ -9,8 +9,6 @@
 /** 从模拟器 DE/LCD 缓冲区读取整屏并写入 SDL（供 lcdTaskMain 定时调用） */
 void de_emulator_periodic_refresh(void);
 
-void handleLcdReg(uint64_t address, u32 data, uint64_t value);
-void compositeLayers(void);
 
 typedef struct _lcdLayer
 {

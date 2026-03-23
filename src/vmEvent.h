@@ -34,14 +34,10 @@ typedef struct vm_event_
     u32 r1;
 } vm_event;
 
+static u8 timer_irq_pending = 0;
 void InitVmEvent();
 void handleVmEvent_EMU(uint64_t address);
 int EnqueueVMEvent(u32 event, u32 r0, u32 r1);
 vm_event *DequeueVMEvent();
-
-extern volatile u8 timer_event_pending;
-extern volatile u8 soft_timer_event_pending;
-extern volatile u8 irq13_chained;
-extern u8 cursor_de_pending;
-extern u32 cursor_de_block_count;
-#define CURSOR_DE_DELAY_BLOCKS 3000u
+/** 鼠标按下/拖动时立即置位 ADC 轮询（不依赖 VM 队列 1000 block 延迟与 IRQ31 是否成功） */
+void moral_vm_touch_adc_request(u32 x, u32 y);

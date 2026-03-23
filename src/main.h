@@ -50,14 +50,12 @@ static inline void SDL_PutPixel32(SDL_Surface *s, unsigned x, unsigned y, Uint32
  * 1024-4096为代码空间
  */
 char *getRealMemPtr(u32 ptr);
-void SimulatePressKey(u8, u8);
+void SimulateMstarPressKey(u8, u8);
 void RunArmProgram(void *);
 void hookBlockCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 extern u8 mssend_pop_log;
 extern u8 de_small_pending;
-extern u32 adc_snapshot_x;
-extern u32 adc_snapshot_y;
 void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data);
 void onCPRSChange(uc_engine *uc, uint64_t address, uint32_t size, u32 data);
 void SaveCpuContext(u32 *);
@@ -86,14 +84,13 @@ bool isIrqMode(u32 cpsr);
 #define FCIE_NC_RBUF_CIFD_BASE (NC_BASE + 0x400)
 
 u32 halTimerCount = 0;
+u32 halTimerIntStatus = 1;
 u32 halTimerOutLength = 0;
 u32 FICE_Status = 0;
 u32 IRQ_MASK_SET_L_Data;
 u32 IRQ_MASK_SET_H_Data;
 
 u8 *ROM_MEMPOOL;
-u8 *ROM_PRISTINE;
-u8 *FLASH_SHADOW;
 u8 *ROM3_MEMPOOL;
 u8 *ROM2_MEMPOOL;
 u8 *RAM_MEMPOOL;
