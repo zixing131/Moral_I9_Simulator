@@ -767,19 +767,16 @@ bool writeSDFile(u8 *Buffer, unsigned long long startPos, u32 size)
     {
         return false;
     }
-    if (g_sd_img_max_bytes != 0ULL)
     {
-        if (startPos >= g_sd_img_max_bytes ||
-            (unsigned long long)size > g_sd_img_max_bytes - startPos)
+        unsigned long long max_allowed = 1ULL * 1024 * 1024 * 1024; /* 1 GB 硬上限 */
+        if (startPos + size > max_allowed)
         {
-            static u32 sd_reject_wr_log;
-            if (sd_reject_wr_log < 12u)
+            static u32 sd_bigwr_log;
+            if (sd_bigwr_log < 8u)
             {
-                sd_reject_wr_log++;
-                printf("[SD] 拒绝写入(防止镜像被拉长): offset=%llu 长度=%u 上限=%llu 字节 (#%u/12)\n",
-                       (unsigned long long)startPos, (unsigned)size, g_sd_img_max_bytes, sd_reject_wr_log);
-                if (sd_reject_wr_log == 12u)
-                    printf("[SD] … 后续同类拒绝不再打印；根因多为 MBR/FAT 声明大于 512MB 镜像，见启动诊断\n");
+                sd_bigwr_log++;
+                printf("[SD] 写入超出1GB上限(跳过): offset=%llu len=%u\n",
+                       (unsigned long long)startPos, (unsigned)size);
             }
             return false;
         }
@@ -796,6 +793,13 @@ bool writeSDFile(u8 *Buffer, unsigned long long startPos, u32 size)
         return false;
     }
     fflush(SD_File_Handle);
+    {
+        static u32 sd_wr_ok_log;
+        if (sd_wr_ok_log < 30u || (sd_wr_ok_log % 100) == 0)
+            printf("[SD-WR] ok offset=%llu len=%u (#%u)\n",
+                   (unsigned long long)startPos, (unsigned)size, sd_wr_ok_log);
+        sd_wr_ok_log++;
+    }
     return true;
 }
 
@@ -1049,7 +1053,8 @@ void initMtkSimalator()
         }
     }
 
-    err = uc_hook_add(MTK, &trace[4], UC_HOOK_BLOCK, hookBlockCallBack, 0, 0, 0xefffffff);
+    /* block hook 已不再需要——事件投递改由 count/timeout 中断后的 handleVmEvent_EMU 处理 */
+    // err = uc_hook_add(MTK, &trace[4], UC_HOOK_BLOCK, hookBlockCallBack, 0, 0, 0xefffffff);
 
     /* 只对 IO 寄存器范围注册 MEM hook，避免每次普通 RAM 读写都调用回调 */
     {
@@ -1236,8 +1241,10 @@ void RunArmProgram(void *startAddr)
 #endif
 
     /*
-     * 用 count 执行固定指令数后返回，在安全点注入中断。
-     * 每次执行完 count 条指令后 PC 精确指向下一条未执行指令。
+     * count=200000: 正常执行时约每 200K 条指令返回一次处理事件，开销极低。
+     * timeout=100000 (100ms): 安全网——如果固件陷入 tight loop 等中断，
+     *   100ms 后强制返回投递中断，防止永久卡死。
+     * 两个条件同时设置，哪个先满足就先返回。
      */
     for (;;)
     {
@@ -1247,7 +1254,7 @@ void RunArmProgram(void *startAddr)
         if (cpsr & 0x20)
             start_pc |= 1;
 
-        p = uc_emu_start(MTK, start_pc, (uint64_t)-1, 0, 2000);
+        p = uc_emu_start(MTK, start_pc, (uint64_t)-1, 100000, 200000);
         uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
 
         if (p != UC_ERR_OK)
@@ -1846,10 +1853,10 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     case 0x1FE99C:
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
-        printf("[LOG_SD]");
+        // printf("[LOG_SD]");
         uc_mem_read(MTK, tmp1, globalSprintfBuff, 128);
-        printf("%s,%x", globalSprintfBuff, tmp2);
-        printf("(call:%x)\n", lastAddress);
+        //printf("%s,%x", globalSprintfBuff, tmp2);
+        //printf("(call:%x)\n", lastAddress);
         break;
     case 0x3B5A00 + 1:
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);

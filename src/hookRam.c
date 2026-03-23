@@ -1311,18 +1311,14 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 if (blk_cnt == 0)
                     blk_cnt = 1;
                 u32 byte_count = blk_cnt * 512;
+                unsigned long long file_offset = (unsigned long long)sector_addr * 512ULL;
                 printf("[SD-CMD17/18] sector=%u blk=%u miu=0x%08x dma=0x%08x\n",
                        sector_addr, blk_cnt, miu_addr, dma_addr);
-                u8 *buf = readSDFile((unsigned long long)sector_addr * 512ULL, byte_count);
+                u8 *buf = readSDFile(file_offset, byte_count);
                 if (buf != NULL)
                 {
                     uc_mem_write(MTK, dma_addr, buf, byte_count);
                     SDL_free(buf);
-                }
-                else
-                {
-                    printf("[SD-CMD17] readSDFile failed: sector=%u file_offset=%llu\n",
-                           sector_addr, (unsigned long long)sector_addr * 512);
                 }
                 SD_CMD_RSP_Buff[0] = 0xdede0000;
                 SD_CMD_RSP_Buff[1] = 0xdede0900;
@@ -1344,11 +1340,12 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 if (blk_cnt == 0)
                     blk_cnt = 1;
                 u32 byte_count = blk_cnt * 512;
+                unsigned long long file_offset = (unsigned long long)sector_addr * 512ULL;
                 u8 *dma_buf = (u8 *)SDL_malloc(byte_count);
                 if (dma_buf != NULL)
                 {
                     uc_mem_read(MTK, dma_addr, dma_buf, byte_count);
-                    writeSDFile(dma_buf, (unsigned long long)sector_addr * 512ULL, byte_count);
+                    writeSDFile(dma_buf, file_offset, byte_count);
                     SDL_free(dma_buf);
                 }
                 SD_CMD_RSP_Buff[0] = 0xdede0000;
