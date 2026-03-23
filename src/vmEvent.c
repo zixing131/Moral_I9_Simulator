@@ -263,7 +263,11 @@ inline void handleVmEvent_EMU(uint64_t address)
             switch (vmEvent->event)
             {
             case VM_EVENT_MSDC_IRQ:
-                StartInterrupt(15 + 32, address);
+                if (!StartInterrupt(15 + 32, address))
+                {
+                    if (vmEvent->r0 < 10)
+                        EnqueueVMEvent(VM_EVENT_MSDC_IRQ, vmEvent->r0 + 1, 0);
+                }
                 break;
             case VM_EVENT_KEYBOARD:
                 handleKeyPadVmEvent(vmEvent, address);
@@ -282,6 +286,11 @@ inline void handleVmEvent_EMU(uint64_t address)
                 {
                     tmp = 0xffffffff;
                     uc_mem_write(MTK, 0x74000408, &tmp, 4);
+                }
+                else
+                {
+                    if (vmEvent->r0 < 10)
+                        EnqueueVMEvent(VM_EVENT_DMA_IRQ, vmEvent->r0 + 1, 0);
                 }
                 break;
             case VM_EVENT_TOUCH_SCREEN_IRQ:

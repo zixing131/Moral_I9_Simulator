@@ -1236,9 +1236,8 @@ void RunArmProgram(void *startAddr)
 #endif
 
     /*
-     * 用 timeout 周期性中断模拟，而非依赖 UC_HOOK_BLOCK + uc_emu_stop。
-     * UC_HOOK_BLOCK 受 TB 缓存影响，tight loop 里不会重复触发，导致中断无法投递。
-     * timeout 由 Unicorn 内部计时器触发，不依赖 TB 翻译，能可靠中断任何循环。
+     * 用 count 执行固定指令数后返回，在安全点注入中断。
+     * 每次执行完 count 条指令后 PC 精确指向下一条未执行指令。
      */
     for (;;)
     {
@@ -1247,7 +1246,8 @@ void RunArmProgram(void *startAddr)
         uint64_t start_pc = (uint64_t)(pc & ~1u);
         if (cpsr & 0x20)
             start_pc |= 1;
-        p = uc_emu_start(MTK, start_pc, (uint64_t)-1, 10000, 0);
+
+        p = uc_emu_start(MTK, start_pc, (uint64_t)-1, 0, 2000);
         uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
 
         if (p != UC_ERR_OK)
@@ -2041,6 +2041,8 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     lastAddress = address;
 }
 
+static u32 irq_inject_count = 0;
+
 bool StartInterrupt(u32 irq_line, u32 lastAddr)
 {
     u32 tmp, mode;
@@ -2065,6 +2067,7 @@ bool StartInterrupt(u32 irq_line, u32 lastAddr)
             if (cur_mode == 0x12 || cur_mode == 0x11)
                 return false;
 
+            u32 thumb = tmp & 0x20;
             tmp2 = (tmp & 0xFFFFFFE0) | 0x12; // IRQ模式
             tmp2 = tmp2 | 0xC0;               // IRQ/FIQ Disable
             uc_reg_write(MTK, UC_ARM_REG_CPSR, &tmp2);
@@ -2074,6 +2077,11 @@ bool StartInterrupt(u32 irq_line, u32 lastAddr)
             uc_reg_write(MTK, UC_ARM_REG_LR, &tmp);
             uc_mem_write(MTK, IRQ_Status, &irq_line, 4);
             uc_reg_write(MTK, UC_ARM_REG_PC, &Interrupt_Handler_Entry);
+
+            irq_inject_count++;
+            if (irq_inject_count <= 20 || (irq_inject_count % 500) == 0)
+                printf("[IRQ] #%u line=%u pc=0x%x lr=0x%x thumb=%u mode=0x%x\n",
+                       irq_inject_count, irq_line, lastAddr, lastAddr + 4, thumb ? 1 : 0, cur_mode);
             return true;
         }
     }
