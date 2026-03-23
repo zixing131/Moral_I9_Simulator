@@ -58,12 +58,9 @@ void handleMsdcReg(uint64_t addr, u32 data, uint64_t value)
             tmp = 0x20;
             uc_mem_write(MTK, SD_DATA_RESP_REG0, &tmp, 4);
             break;
-        case SDC_CMD_CMD41_SD: // 初始化SD命令
-            // printf("初始化SD卡\n");
-            //  bit 31 = 1：卡已经准备好，可以进行后续操作。
-            //  bit 30 = 0：该卡为标准容量卡 SDSC，不是 SDHC/SDXC 高容量卡。
-            //  bit 23-15 = 0xFF：卡支持的电压范围是 2.7V到3.6V。
-            tmp = 0x80FF8000; // 普通容量SD卡
+        case SDC_CMD_CMD41_SD: // 初始化SD命令 (ACMD41 OCR)
+            // bit31=1 上电完成；bit30=1 CCS，典型 SDHC/SDXC 镜像；bit23-8 电压窗口
+            tmp = 0xC0FF8000;
             uc_mem_write(MTK, SD_DATA_RESP_REG0, &tmp, 4);
             break;
         case SDC_CMD_CMD3_SD: // SEND_RELATIVE_ADDR (RCA)在 SD 卡的初始化过程中为卡分配一个相对地址
@@ -86,32 +83,28 @@ void handleMsdcReg(uint64_t addr, u32 data, uint64_t value)
             break;
         case SDC_CMD_CMD18: // 读取多个数据块
         case SDC_CMD_CMD17: // 读取单个数据块
-
             if (vm_dma_msdc_config.config_finish == 1)
             {
-                // printf("read sd block[%x][%x]\n", vm_dma_msdc_config.MSDC_DATA_ADDR, vm_dma_msdc_config.transfer_count);
                 msdcDataPtr = readSDFile(vm_dma_msdc_config.MSDC_DATA_ADDR, vm_dma_msdc_config.transfer_count);
                 if (msdcDataPtr != NULL)
                 {
                     uc_mem_write(MTK, vm_dma_msdc_config.data_addr, msdcDataPtr, vm_dma_msdc_config.transfer_count);
                     SDL_free(msdcDataPtr);
                 }
-                // msdc dma传输完成
                 vm_dma_msdc_config.config_finish = 0;
                 changeTmp = 0x8000;
                 uc_mem_write(MTK, SDC_DATSTA_REG, &changeTmp, 4);
-                // 如果传输完成后中断，则进行回调
                 if (vm_dma_msdc_config.transfer_end_interrupt_enable == 1)
                 {
                     vm_dma_msdc_config.transfer_end_interrupt_enable = 0;
                     EnqueueVMEvent(VM_EVENT_MSDC_IRQ, 0, 0);
                 }
             }
+            break;
         case SDC_CMD_CMD25: // 写多个数据块
         case SDC_CMD_CMD24: // 写单个数据块
             if (vm_dma_msdc_config.config_finish == 1)
             {
-                // printf("write sd block[%x]\n", vm_dma_msdc_config.MSDC_DATA_ADDR);
                 vm_dma_msdc_config.config_finish = 0;
                 uc_mem_read(MTK, vm_dma_msdc_config.data_addr, vm_dma_msdc_config.cacheBuffer, vm_dma_msdc_config.transfer_count);
                 writeSDFile(vm_dma_msdc_config.cacheBuffer, vm_dma_msdc_config.MSDC_DATA_ADDR, vm_dma_msdc_config.transfer_count);
@@ -123,6 +116,7 @@ void handleMsdcReg(uint64_t addr, u32 data, uint64_t value)
                     EnqueueVMEvent(VM_EVENT_MSDC_IRQ, 0, 0);
                 }
             }
+            break;
         case SDC_CMD_ACMD42: // 卡检测信号通常用于检测 SD 卡是否插入或取出
             // printf("SD卡 检查是否插入或取出(%x)\n", SEND_SDDATA_CACHE);
             break;

@@ -730,6 +730,9 @@ void initMtkSimalator()
     //??
     err = uc_mem_map_ptr(MTK, 0x1c000000, size_32mb, UC_PROT_ALL, SDL_malloc(size_32mb));
 
+    /* KER/BACKTRACE 诊断路径会访问 0x2800xxxx，缺失映射会触发 UC_ERR_MAP */
+    err = uc_mem_map_ptr(MTK, 0x28000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
+
     //??
     err = uc_mem_map_ptr(MTK, 0x74000000, size_4mb, UC_PROT_ALL, SDL_malloc(size_4mb));
     //??
@@ -808,12 +811,14 @@ void initMtkSimalator()
 
     /* 只对 IO 寄存器范围注册 MEM hook，避免每次普通 RAM 读写都调用回调 */
     {
-        static uc_hook mem_hooks[16];
+        static uc_hook mem_hooks[24];
         int mi = 0;
         static const u32 mem_ranges[][2] = {
             {0x34000000, 0x3400FFFF}, /* MTK 外设寄存器 (IRQ/Timer/UART/AUXADC) */
             {0x74000000, 0x74006FFF}, /* DE/DMA/FCIE/SPI */
             {0x81060000, 0x810600FF}, /* GPT */
+            {0x810E0000, 0x810E00FF}, /* MSDC 寄存器 → handleMsdcReg */
+            {0x81020200, 0x810202FF}, /* DMA MSDC 通道 (base+0x200)，勿含 0x810203xx 以免与 SIM DMA 冲突 */
             {0x82050000, 0x82050FFF}, /* AUX 触摸 */
             {0x90000000, 0x90000FFF}, /* LCD 控制器 */
             {0x00D00000, 0x00D0FFFF}, /* XRAM 全局量 (RF config) */

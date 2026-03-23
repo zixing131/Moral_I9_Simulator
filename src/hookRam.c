@@ -848,14 +848,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         else
         {
             FICE_Status = value;
-            // if ((value & 2) == 2) // 写2清0
-            //     FICE_Status = 0;
-            // if ((value & 4) == 4) // 写2清0
-            //     FICE_Status = 0;
-            // if ((value & 6) == 6) // 写2清0
-            //     FICE_Status = 0;
-            // if ((value & 0x801) == 0x801) // 写2清0
-            //     FICE_Status = 0;
         }
         break;
     case 0x74005004: // FCIE 中断状态寄存器 NC_wait_MIULastDone
@@ -1210,8 +1202,16 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         {
             uc_mem_read(MTK, 0x74005200, &SD_CMD_Buff, 32);
             u32 *p = SD_CMD_Buff;
-            // 开始解析SD命令
-            if ((p[0] == 0x48) && p[1] == 0x100 && p[2] == 0x5a)
+            my_memset(SD_CMD_RSP_Buff, 0, sizeof(SD_CMD_RSP_Buff));
+            // 开始解析SD命令（FCIE 打包格式，未命中时用闲状态避免脏数据）
+            if (p[0] == 0x40u && p[1] == 0u && p[2] == 0u)
+            {
+                /* CMD0 GO_IDLE_STATE — 日志 p0=0x40；RSP 与 CMD8 占位一致供 DrvSD 继续 */
+                SD_CMD_RSP_Buff[0] = 0xdede0000;
+                SD_CMD_RSP_Buff[1] = 0xdede0100;
+                SD_CMD_RSP_Buff[2] = 0xdede005a;
+            }
+            else if ((p[0] == 0x48) && p[1] == 0x100 && p[2] == 0x5a)
             {
                 // SD_CMD_RSP_Buff[0] = 0xdede0000; // 最后两字节有效
                 // SD_CMD_RSP_Buff[1] = 0xdede0100;
@@ -1257,6 +1257,18 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 SD_CMD_RSP_Buff[0] = 0x01020304;
                 SD_CMD_RSP_Buff[1] = 0x05060708;
                 // printf("hit sd cmd CID\n");
+            }
+            else
+            {
+                static u32 sd_fcie_unknown;
+                if (sd_fcie_unknown < 32u)
+                {
+                    sd_fcie_unknown++;
+                    printf("[SD-FCIE] unhandled p0=0x%x p1=0x%x p2=0x%x\n", p[0], p[1], p[2]);
+                }
+                SD_CMD_RSP_Buff[0] = 0xdede0000;
+                SD_CMD_RSP_Buff[1] = 0xdede0100;
+                SD_CMD_RSP_Buff[2] = 0xdede005a;
             }
             // else
             //     printf("not hit cmd");
@@ -1476,6 +1488,12 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         }
         else if (address >= 0x81060000 && address < 0x81060100)
             handleGptReg(address, data, value);
+        else if ((address >= 0x810E0000u && address <= 0x810E00FFu) ||
+                 (address >= 0x81020200u && address <= 0x810202FFu))
+        {
+            u32 is_wr = (type == UC_MEM_WRITE) ? 1u : 0u;
+            handleMsdcReg(address, is_wr, (uint64_t)(uint32_t)value);
+        }
         /* DE register range 0x74003000-0x74005000: no special handling needed */
         break;
     }
