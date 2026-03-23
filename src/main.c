@@ -143,6 +143,8 @@ u32 SD_DMA_Type;              // 0表示读取SD数据块 1表示写SD数据块
 u8 ucs2Tmp[128] = {0}; // utf16-le转utf-8 缓存空间
 
 FILE *SD_File_Handle;
+/** 本次运行打开 SD 镜像时的文件字节数；写入不得超出，否则 Win 上 fwrite 会把文件拉长到数 GB */
+static unsigned long long g_sd_img_max_bytes;
 pthread_mutex_t mutex; // 线程锁
 u32 lastFlashTime;
 u32 lastTaskTime;
@@ -158,6 +160,7 @@ SDL_Keycode isKeyDown = SDLK_UNKNOWN;
 bool isMouseDown = false;
 pthread_t emu_thread;
 pthread_t screen_render_thread;
+
 
 u8 currentProgramDir[256] = {0};
 
@@ -437,11 +440,13 @@ void loop()
         SDL_Delay(1);
     }
 
-    // 等待线程结束
-    pthread_join(&emu_thread, &thread_ret);
-    pthread_join(&screen_render_thread, &thread_ret);
+    // 等待线程结束（pthread_t 按值传入，勿传 &thread）
+    pthread_join(emu_thread, &thread_ret);
+    pthread_join(screen_render_thread, &thread_ret);
     if (SD_File_Handle != NULL)
         fclose(SD_File_Handle);
+    SD_File_Handle = NULL;
+    g_sd_img_max_bytes = 0;
     saveFlashFile();
 }
 
@@ -512,45 +517,274 @@ int writeFile(const char *filename, void *buff, u32 size)
     fclose(file);
     return result;
 }
-u8 *readSDFile(u32 startPos, u32 size)
+/* SD 镜像可能 >2GB 或扇区偏移*512 超过 32 位；Win 上用 _fseeki64 */
+static int sd_img_fseek_set(FILE *fp, unsigned long long pos)
+{
+#if defined(_WIN32)
+    return _fseeki64(fp, (__int64)pos, SEEK_SET);
+#else
+    if (pos > (unsigned long long)LONG_MAX)
+        return -1;
+    return fseek(fp, (long)pos, SEEK_SET);
+#endif
+}
+
+static u16 sd_ld16_img(const u8 *p)
+{
+    return (u16)p[0] | ((u16)p[1] << 8);
+}
+
+static u32 sd_ld32_img(const u8 *p)
+{
+    return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
+}
+
+/* 对比 MBR 分区范围 / FAT BPB 与镜像文件大小；超出则必然出现写被拒、FAT 异常、间歇无法开机 */
+static void sd_diagnose_image_geometry(FILE *fp, unsigned long long file_bytes)
+{
+#if defined(_WIN32)
+    __int64 save = _ftelli64(fp);
+#else
+    long save = ftell(fp);
+#endif
+    u8 s0[512];
+    unsigned long long nsec = file_bytes / 512ULL;
+
+    if (file_bytes < 512ULL)
+        goto restore;
+    if (sd_img_fseek_set(fp, 0ULL) != 0)
+        goto restore;
+    if (fread(s0, 1, 512, fp) != 512)
+        goto restore;
+    if (s0[0x1FE] != 0x55 || s0[0x1FF] != 0xAA)
+        goto restore;
+
+    {
+        u32 lba = sd_ld32_img(s0 + 0x1C6);
+        u32 cnt = sd_ld32_img(s0 + 0x1CA);
+        if (cnt != 0u)
+        {
+            unsigned long long part_end = (unsigned long long)lba + (unsigned long long)cnt;
+            if (part_end > nsec || (unsigned long long)cnt > nsec)
+            {
+                printf("[SD] !!! MBR 第一分区超出镜像文件: LBA首=%u 扇区数=%u (末LBA=%llu) 镜像总扇区=%llu\n",
+                       lba, cnt, part_end - 1ULL, nsec);
+                printf("[SD]     → 用 DiskGenius 把分区容量调到不超过镜像大小再格式化，否则必现写被拒/系统不稳\n");
+            }
+            if (cnt >= 1u && (unsigned long long)lba < nsec &&
+                (unsigned long long)lba + (unsigned long long)cnt <= nsec)
+            {
+                u8 vbr[512];
+                unsigned long long off = (unsigned long long)lba * 512ULL;
+                if (sd_img_fseek_set(fp, off) == 0 && fread(vbr, 1, 512, fp) == 512 &&
+                    vbr[0x1FE] == 0x55 && vbr[0x1FF] == 0xAA)
+                {
+                    u16 bps = sd_ld16_img(vbr + 0x0B);
+                    u16 ts16 = sd_ld16_img(vbr + 0x13);
+                    u32 ts32 = sd_ld32_img(vbr + 0x20);
+                    u32 vol_sec = (ts16 != 0) ? (u32)ts16 : ts32;
+                    if (bps != 0u && vol_sec != 0u)
+                    {
+                        unsigned long long vb = (unsigned long long)vol_sec * (unsigned long long)bps;
+                        if (vb > file_bytes)
+                        {
+                            printf("[SD] !!! FAT 引导扇区声明卷大小约 %llu 字节 > 镜像 %llu 字节\n", vb,
+                                   file_bytes);
+                            printf("[SD]     → 请重做分区/格式化使总扇区×512 不超过镜像文件长度\n");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+restore:
+#if defined(_WIN32)
+    if (save >= 0)
+        (void)_fseeki64(fp, save, SEEK_SET);
+#else
+    if (save >= 0)
+        (void)fseek(fp, save, SEEK_SET);
+#endif
+}
+
+static int sd_img_get_file_size(FILE *fp, unsigned long long *out_sz)
+{
+#if defined(_WIN32)
+    __int64 save = _ftelli64(fp);
+    if (save < 0)
+        return -1;
+    if (_fseeki64(fp, 0, SEEK_END) != 0)
+        return -1;
+    __int64 sz = _ftelli64(fp);
+    if (sz < 0)
+        return -1;
+    if (_fseeki64(fp, save, SEEK_SET) != 0)
+        return -1;
+    *out_sz = (unsigned long long)sz;
+    return 0;
+#else
+    long save = ftell(fp);
+    if (save < 0)
+        return -1;
+    if (fseek(fp, 0, SEEK_END) != 0)
+        return -1;
+    long sz = ftell(fp);
+    if (sz < 0)
+        return -1;
+    if (fseek(fp, save, SEEK_SET) != 0)
+        return -1;
+    *out_sz = (unsigned long long)sz;
+    return 0;
+#endif
+}
+
+/*
+ * SDHC CSD V2.0：用户容量 = (C_SIZE+1) * 512 KiB = (C_SIZE+1) * 1024 个 512B 扇区。
+ * 按镜像文件实际长度换算，并向下对齐到 1024 扇区（SDHC 要求）。
+ */
+unsigned long sd_get_reported_sectors_for_csd(void)
+{
+    unsigned long long fsize = 0;
+    const unsigned long fallback = 1048576UL; /* 默认 512MB */
+    if (g_sd_img_max_bytes != 0ULL)
+        fsize = g_sd_img_max_bytes;
+    else if (SD_File_Handle == NULL)
+        return fallback;
+    else if (sd_img_get_file_size(SD_File_Handle, &fsize) != 0)
+        return fallback;
+    if (fsize < 512ULL)
+        return 1024UL;
+    {
+        unsigned long long sec = fsize / 512ULL;
+        unsigned long long aligned = (sec / 1024ULL) * 1024ULL;
+        if (aligned < 1024ULL)
+            aligned = 1024ULL;
+        /* C_SIZE 为 22 位：最大 (0x3FFFFF+1)*1024 扇区 */
+        {
+            unsigned long long max_sec = 0x400000ULL * 1024ULL;
+            if (aligned > max_sec)
+                aligned = max_sec;
+        }
+        return (unsigned long)aligned;
+    }
+}
+
+void sd_fill_csd_v2_regs(u32 csd_regs[9])
+{
+    unsigned long sec = sd_get_reported_sectors_for_csd();
+    unsigned long c_size = sec / 1024UL - 1UL;
+    if (c_size > 0x3FFFFFu)
+        c_size = 0x3FFFFFu;
+    {
+        u32 be = (u32)(c_size & 0x3FFFFFu);
+        u8 b7 = (u8)((be >> 24) & 0xFF);
+        u8 b8 = (u8)((be >> 16) & 0xFF);
+        u8 b9 = (u8)((be >> 8) & 0xFF);
+        u8 b10 = (u8)(be & 0xFF);
+        my_memset(csd_regs, 0, (int)(sizeof(u32) * 9));
+        csd_regs[0] = 0x00u | (0x40u << 8);
+        csd_regs[1] = 0x0Eu | (0x00u << 8);
+        csd_regs[2] = 0x5Au | (0x5Bu << 8);
+        csd_regs[3] = 0x59u | ((u32)b7 << 8);
+        csd_regs[4] = (u32)b8 | ((u32)b9 << 8);
+        csd_regs[5] = (u32)b10 | (0x7Fu << 8);
+        csd_regs[6] = 0x80u | (0x0Au << 8);
+        csd_regs[7] = 0x40u | (0x00u << 8);
+        csd_regs[8] = 0x01u;
+    }
+}
+
+u8 *readSDFile(unsigned long long startPos, u32 size)
 {
     u8 *tmp;
     u8 flag;
+    static u32 sd_read_oob_warns;
     if (SD_File_Handle == NULL)
     {
         return NULL;
     }
-    // 为 tmp 分配内存
     tmp = (u8 *)SDL_malloc(size);
     if (tmp == NULL)
     {
         printf("申请文件内存失败");
         return NULL;
     }
-    if (fseek(SD_File_Handle, startPos, SEEK_SET) > 0)
+    my_memset(tmp, 0, size);
     {
-        printf("移动文件指针失败");
-        return NULL;
-    }
-    // 读取文件内容到 tmp 中
-    size_t result = fread(tmp, 1, size, SD_File_Handle);
-    if (result != size)
-    {
-        printf("读取SD卡文件失败 %x <> %x\n", result, size);
-        SDL_free(tmp);
-        return NULL;
+        unsigned long long fsize = 0;
+        if (sd_img_get_file_size(SD_File_Handle, &fsize) != 0)
+        {
+            printf("读取SD卡：无法取得镜像大小\n");
+            SDL_free(tmp);
+            return NULL;
+        }
+        if (startPos >= fsize)
+        {
+            if (sd_read_oob_warns < 8u)
+            {
+                sd_read_oob_warns++;
+                printf("[SD] 读越界(视为全0): offset=%llu size=%u 镜像=%llu 字节\n",
+                       (unsigned long long)startPos, (unsigned)size, fsize);
+            }
+            return tmp;
+        }
+        {
+            unsigned long long avail = fsize - startPos;
+            size_t to_read = (avail >= (unsigned long long)size) ? (size_t)size : (size_t)avail;
+            if (to_read == 0)
+                return tmp;
+            if (sd_img_fseek_set(SD_File_Handle, startPos) != 0)
+            {
+                printf("移动文件指针失败");
+                SDL_free(tmp);
+                return NULL;
+            }
+            {
+                size_t result = fread(tmp, 1, to_read, SD_File_Handle);
+                if (result != to_read)
+                {
+                    printf("读取SD卡文件失败 %zu <> %zu\n", result, to_read);
+                    SDL_free(tmp);
+                    return NULL;
+                }
+            }
+            if (to_read < (size_t)size && sd_read_oob_warns < 8u)
+            {
+                sd_read_oob_warns++;
+                printf("[SD] 读部分越界: offset=%llu 请求=%u 实际可读=%zu 余下填0 (镜像=%llu)\n",
+                       (unsigned long long)startPos, (unsigned)size, to_read, fsize);
+            }
+        }
     }
     return tmp;
 }
 
-bool writeSDFile(u8 *Buffer, u32 startPos, u32 size)
+bool writeSDFile(u8 *Buffer, unsigned long long startPos, u32 size)
 {
     u8 flag;
     if (SD_File_Handle == NULL)
     {
         return false;
     }
-    if (fseek(SD_File_Handle, startPos, SEEK_SET) > 0)
+    if (g_sd_img_max_bytes != 0ULL)
+    {
+        if (startPos >= g_sd_img_max_bytes ||
+            (unsigned long long)size > g_sd_img_max_bytes - startPos)
+        {
+            static u32 sd_reject_wr_log;
+            if (sd_reject_wr_log < 12u)
+            {
+                sd_reject_wr_log++;
+                printf("[SD] 拒绝写入(防止镜像被拉长): offset=%llu 长度=%u 上限=%llu 字节 (#%u/12)\n",
+                       (unsigned long long)startPos, (unsigned)size, g_sd_img_max_bytes, sd_reject_wr_log);
+                if (sd_reject_wr_log == 12u)
+                    printf("[SD] … 后续同类拒绝不再打印；根因多为 MBR/FAT 声明大于 512MB 镜像，见启动诊断\n");
+            }
+            return false;
+        }
+    }
+    if (sd_img_fseek_set(SD_File_Handle, startPos) != 0)
     {
         printf("移动文件指针失败\n");
         return false;
@@ -561,6 +795,7 @@ bool writeSDFile(u8 *Buffer, u32 startPos, u32 size)
         printf("写入文件失败\n");
         return false;
     }
+    fflush(SD_File_Handle);
     return true;
 }
 
@@ -792,6 +1027,8 @@ void initMtkSimalator()
             {0x1DEF62, 0x1DEF63},     /* HalUtilPHY2MIUAddr entry */
             {0x1DEF6C, 0x1DEF6D},     /* HalUtilPHY2MIUAddr clamp to 0 branch */
             {0x33370,  0x33371},      /* MDrvFCIEStorageR: capture DMA phys addr */
+            {0x336C2,  0x336C3},      /* MDrvFCIEStorageW: capture DMA phys addr */
+            {0x40ED0,  0x40ED1},      /* Drv_DoDataCompare: skip write verify */
             {0x30F34A, 0x30F34B},     /* dev_accGetLCDStatus */
             {0x32DFA4, 0x32DFA5},     /* _RtkAssertRoutine */
             {0x34D236, 0x34D237},     /* MsSend POP */
@@ -988,23 +1225,40 @@ void FindNorFlashId()
 
 void RunArmProgram(void *startAddr)
 {
-    u32 startAddress = (u32)startAddr;
-
+    u32 pc = (u32)(size_t)startAddr;
     uc_err p;
-    // 启动前工作
 
 #ifdef GDB_SERVER_SUPPORT
     gdbTarget.running = 1;
-    gdbTarget.breakpoints[gdbTarget.num_breakpoints++] = startAddress;
-    // 等待连接
+    gdbTarget.breakpoints[gdbTarget.num_breakpoints++] = pc;
     readAllCpuRegFunc = ReadRegsToGdb;
     gdb_readMemFunc = readMemoryToGdb;
 #endif
-    p = uc_emu_start(MTK, startAddress, -1, 0, 0);
-    // p = uc_emu_start(MTK, 3, 8, 0, 0);
+
+    /*
+     * 用 timeout 周期性中断模拟，而非依赖 UC_HOOK_BLOCK + uc_emu_stop。
+     * UC_HOOK_BLOCK 受 TB 缓存影响，tight loop 里不会重复触发，导致中断无法投递。
+     * timeout 由 Unicorn 内部计时器触发，不依赖 TB 翻译，能可靠中断任何循环。
+     */
+    for (;;)
+    {
+        u32 cpsr;
+        uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
+        uint64_t start_pc = (uint64_t)(pc & ~1u);
+        if (cpsr & 0x20)
+            start_pc |= 1;
+        p = uc_emu_start(MTK, start_pc, (uint64_t)-1, 1000, 0);
+        uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+
+        if (p != UC_ERR_OK)
+            break;
+
+        handleVmEvent_EMU((uint64_t)pc);
+        uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+    }
 
     if (p == UC_ERR_READ_UNMAPPED)
-        printf("模拟错误：此处内存不可读\n", p);
+        printf("模拟错误：此处内存不可读\n");
     else if (p == UC_ERR_WRITE_UNMAPPED)
         printf("模拟错误：此处内存不可写\n");
     else if (p == UC_ERR_FETCH_UNMAPPED)
@@ -1030,10 +1284,6 @@ void MainUpdateTask()
             continue;
         }
 #endif
-        /*
-         * 刷新显示/RTC 不得依赖 VmEventCount。LCD 中断等会高频入队且 Dequeue 很慢，
-         * 队列接近满时若跳过 lcdTaskMain，周期性显存同步停止 → 锁屏后画面与时间“冻住”。
-         */
         lcdTaskMain();
         RtcTaskMain();
         if (currentTime > last_gpt1_interrupt_time)
@@ -1189,9 +1439,27 @@ int main(int argc, char *args[])
                    lt->tm_hour, lt->tm_min, lt->tm_sec, (unsigned)rtc_err, rb_hour);
         }
 
+        g_sd_img_max_bytes = 0;
         SD_File_Handle = fopen(SD_CARD_IMG_PATH, "r+b");
         if (SD_File_Handle == NULL)
             printf("没有SD卡镜像文件，跳过加载\n");
+        else
+        {
+            if (sd_img_get_file_size(SD_File_Handle, &g_sd_img_max_bytes) != 0)
+            {
+                printf("[SD] 无法读取镜像大小，写入将不加上限保护\n");
+                g_sd_img_max_bytes = 0;
+            }
+            else
+            {
+                printf("[SD] 镜像打开大小: %llu 字节（写入不会超出此长度，避免被撑成数 GB）\n",
+                       g_sd_img_max_bytes);
+                sd_diagnose_image_geometry(SD_File_Handle, g_sd_img_max_bytes);
+            }
+            unsigned long sec = sd_get_reported_sectors_for_csd();
+            unsigned long long mb = (unsigned long long)sec * 512ULL / (1024ULL * 1024ULL);
+            printf("[SD] 镜像 CSD 报告容量: %lu 扇区 (~%llu MiB)\n", sec, mb);
+        }
 
         // 启动emu线程
         pthread_create(&emu_thread, NULL, RunArmProgram, ROM_ADDRESS);
@@ -1231,7 +1499,8 @@ char *getRealMemPtr(u32 ptr)
 }
 void hookBlockCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
-    handleVmEvent_EMU(address);
+    /* 不再使用 block hook 投递事件；改用 uc_emu_start timeout 机制。
+     * 保留空回调以兼容 uc_hook_add 注册。 */
 }
 
 /**
@@ -1478,10 +1747,26 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         printf("[PHY2MIU] in=0x%08x\n", tmp1);
         break;
     }
-    case 0x1DEF6C: /* HalUtilPHY2MIUAddr 返回0分支 — 仅日志 */
+    case 0x1DEF6C:
+    case 0x1DEF6D: /* HalUtilPHY2MIUAddr 越界分支（Thumb 可能 +1） */
     {
-        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        printf("[PHY2MIU] clamp! raw_diff=0x%08x\n", tmp1);
+        /* IDA: 1def6c MOVS R0,#0 → 1def6e MVNS R0,R0 → 返回 0xFFFFFFFF（不是 0）。
+         * 该值若被当成指针传入 KER_VERROR_DIAGNOSE(0x3B5C54)，R0&0x110000 非 0 会进 fatal error2；
+         * 且 lastAddress 在 switch 末尾才赋值，printf 会误打成「上一条」PC（常见 1def6c）。 */
+        static u32 phy_clamp_log;
+        if (phy_clamp_log < 24u)
+        {
+            phy_clamp_log++;
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            printf("[PHY2MIU] clamp: 固件将返回-1；改为返回0并跳过MVNS, raw_R0=0x%08x\n", tmp1);
+        }
+        tmp1 = 0;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_CPSR, &tmp3);
+        tmp2 = 0x1DEF70u;
+        if (tmp3 & 0x20u)
+            tmp2 |= 1u; /* Thumb */
+        uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
         break;
     }
     case 0x33370: /* MDrvFCIEStorageR 入口 — 保存 a4（SD DMA物理地址） */
@@ -1489,6 +1774,22 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp1);
         g_sd_dma_phys_addr = tmp1;
         printf("[STG_R_HOOK] a4(phys)=0x%08x\n", tmp1);
+        break;
+    }
+    case 0x336C2: /* MDrvFCIEStorageW 入口 — 保存 a4（写操作 DMA 物理地址） */
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp1);
+        g_sd_dma_phys_addr = tmp1;
+        printf("[STG_W_HOOK] a4(phys)=0x%08x\n", tmp1);
+        break;
+    }
+    case 0x40ED0: /* Drv_DoDataCompare — 跳过写后数据比较验证，直接返回 0（成功） */
+    {
+        u32 lr;
+        uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        tmp1 = 0;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_write(MTK, UC_ARM_REG_PC, &lr);
         break;
     }
     case 0x1a605c:
@@ -1562,13 +1863,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         break;
     case 0x36ed44:
     case 0x3b5ba4:
-        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        if ((tmp1 & 0x110000) != 0)
-        {
-            printf("fatal error3: %x \n", lastAddress);
-            while (1)
-                ;
-        }
+        /* 原 (R0&0x110000) 在真机上可能筛「坏指针」；模拟器里 0x20xxxxxx 等合法 RAM 常含 bit16→误触发死循环 */
         break;
     // case 0x12E92:
     //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
@@ -1704,12 +1999,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     case 0x1C007160:
     case 0x3B5C54:
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        if ((tmp1 & 0x110000) != 0)
-        {
-            printf("fatal error2: %x \n", lastAddress);
-            while (1)
-                ;
-        }
+        /* 勿再用 (R0&0x110000) 卡死：例如 R0=0x2001001e 为合法 SRAM 指针也会命中 */
         {
             static u32 kerr_cnt = 0;
             kerr_cnt++;

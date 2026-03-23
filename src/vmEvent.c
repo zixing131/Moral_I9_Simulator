@@ -123,6 +123,11 @@ uint64_t handleTick;
 
 static u32 timer_irq_channel = 14;
 
+int moral_vm_has_pending_events(void)
+{
+    return timer_irq_pending || VmEventCount > 0 || pending_touch_active || touch_irq_pending;
+}
+
 inline void handleVmEvent_EMU(uint64_t address)
 {
     u32 tmp;
@@ -130,12 +135,11 @@ inline void handleVmEvent_EMU(uint64_t address)
     /* 重投递上次失败的 Timer IRQ */
     if (timer_irq_pending)
     {
+        timer_irq_pending = 0;
         if (StartInterrupt(timer_irq_channel, address))
         {
             tmp = 0x20;
             uc_mem_write(MTK, 0x34002C28, &tmp, 4);
-
-            timer_irq_pending = 0;
             return;
         }
     }
@@ -252,20 +256,14 @@ inline void handleVmEvent_EMU(uint64_t address)
             touch_adc_pending = 0;
     }
 
-    if (handleTick++ > 1000)
     {
-        handleTick = 0;
         vmEvent = DequeueVMEvent();
         if (vmEvent > 0)
         {
             switch (vmEvent->event)
             {
             case VM_EVENT_MSDC_IRQ:
-                if (!StartInterrupt(15 + 32, address))
-                {
-                    EnqueueVMEvent(VM_EVENT_MSDC_IRQ, 0, 0);
-                    // printf("requeue mie %x\n", FICE_Status);
-                }
+                StartInterrupt(15 + 32, address);
                 break;
             case VM_EVENT_KEYBOARD:
                 handleKeyPadVmEvent(vmEvent, address);
@@ -280,14 +278,11 @@ inline void handleVmEvent_EMU(uint64_t address)
                 }
                 break;
             case VM_EVENT_DMA_IRQ:
-                // 位于高32位中断
                 if (StartInterrupt(23 + 32, address))
                 {
                     tmp = 0xffffffff;
                     uc_mem_write(MTK, 0x74000408, &tmp, 4);
                 }
-                else
-                    EnqueueVMEvent(VM_EVENT_DMA_IRQ, 0, 0);
                 break;
             case VM_EVENT_TOUCH_SCREEN_IRQ:
                 break;

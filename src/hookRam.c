@@ -49,7 +49,7 @@ u32 UART2_Buf_Idx = 0;
 u8 SD_CMD_L;
 u8 SD_CMD_H;
 u32 SD_CMD_RSP_Buff[8];
-u32 g_sd_dma_phys_addr = 0;  /* MDrvFCIEStorageR 的 a4 参数（原始物理地址） */
+u32 g_sd_dma_phys_addr = 0;  /* MDrvFCIEStorageR/W 的 a4 参数（原始物理地址） */
 
 u32 SD_CMD_Buff[8];
 u16 SD_CMD_Buff_Idx = 0;
@@ -406,9 +406,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             }
             if (SPI_CMD_Buf_Idx < 1)
             {
-                printf("error HalPagingSpiBusWrite\n");
-                while (1)
-                    ;
+                printf("[SPI] error HalPagingSpiBusWrite (ignored)\n");
             }
             uc_mem_write(MTK, (u32)address, &SPI_DATA_Buf[--SPI_DATA_Buf_Idx], 4);
         }
@@ -651,35 +649,22 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
 
             if (is_cursor_de)
             {
-                /*
-                 * Simulate real hardware DE DMA latency for tiny regions.
-                 * On real HW the DMA takes ~1 ms; without this delay the
-                 * firmware's cursor-redraw loop spins thousands of times
-                 * per second, starving every other RTOS task.
-                 *
-                 * We sleep until at least 16 ms (~60 fps) have elapsed
-                 * since the last cursor draw.  SDL_Delay yields the
-                 * emulator thread so the main (SDL event) thread keeps
-                 * running; when we wake we set the completion status and
-                 * the firmware proceeds normally.
-                 */
+                clock_t now = clock();
                 clock_t min_interval = (clock_t)(CLOCKS_PER_SEC / 60);
                 if (min_interval < 1)
                     min_interval = 1;
 
-                while (cursor_de_last_draw != 0 &&
-                       (clock() - cursor_de_last_draw) < min_interval)
+                if (cursor_de_last_draw == 0 ||
+                    (now - cursor_de_last_draw) >= min_interval)
                 {
-                    SDL_Delay(1);
-                }
-                cursor_de_last_draw = clock();
-
-                if (de_read_fb(srcBuf, pitch, w, h) == 0)
-                {
-                    u16 dstX, dstY;
-                    de_resolve_blit_dest(srcBuf, &dstX, &dstY);
-                    de_blit_to_sdl(dstX, dstY, w, h, (u32)w * DE_BPP);
-                    Lcd_Need_Update = 1;
+                    cursor_de_last_draw = now;
+                    if (de_read_fb(srcBuf, pitch, w, h) == 0)
+                    {
+                        u16 dstX, dstY;
+                        de_resolve_blit_dest(srcBuf, &dstX, &dstY);
+                        de_blit_to_sdl(dstX, dstY, w, h, (u32)w * DE_BPP);
+                        Lcd_Need_Update = 1;
+                    }
                 }
 
                 tmp = 0xF00;
@@ -913,10 +898,9 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             nandFlashCMDData[nandFlashCmdIdx++] = (u16)value;
             if (nandFlashCmdIdx >= 32)
             {
-                printf(" %x ", lastAddress);
-                printf("write NC_AUXREG_DAT[%d] %x\n", nandFlashCmdIdx, (u16)value);
-                while (1)
-                    ;
+                printf("[nand] NC_AUXREG_DAT overflow idx=%d val=0x%x pc=0x%x\n",
+                       nandFlashCmdIdx, (u16)value, lastAddress);
+                nandFlashCmdIdx = 31;
             }
         }
         break;
@@ -1098,10 +1082,12 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                     }
                     else
                     {
-                        printf(" %x ", lastAddress);
-                        printf("unhandle 0x19 act %x \n", act);
-                        while (1)
-                            ;
+                        static u32 nand_act19_warn;
+                        if (nand_act19_warn < 16u)
+                        {
+                            nand_act19_warn++;
+                            printf("[nand] unhandled cmd 0x19 act=0x%x pc=0x%x\n", act, lastAddress);
+                        }
                     }
                 }
                 else if (nandFlashCMD == 0x18)
@@ -1167,18 +1153,23 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                     }
                     else
                     {
-                        printf("unhandle 0x18 act %x \n", act);
-                        printf("%x\n", lastAddress);
-
-                        while (1)
-                            ;
+                        static u32 nand_act18_warn;
+                        if (nand_act18_warn < 16u)
+                        {
+                            nand_act18_warn++;
+                            printf("[nand] unhandled cmd 0x18 act=0x%x pc=0x%x\n", act, lastAddress);
+                        }
                     }
                 }
                 else
                 {
-                    printf("unhandle nand cmd %x \n", nandFlashCMD);
-                    while (1)
-                        ;
+                    static u32 nand_cmd_warn;
+                    if (nand_cmd_warn < 16u)
+                    {
+                        nand_cmd_warn++;
+                        printf("[nand] unhandled cmd 0x%x act=0x%x pc=0x%x\n",
+                               nandFlashCMD, act, lastAddress);
+                    }
                 }
             }
         }
@@ -1209,6 +1200,12 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             uc_mem_read(MTK, 0x74005200, &SD_CMD_Buff, 32);
             u32 *p = SD_CMD_Buff;
             my_memset(SD_CMD_RSP_Buff, 0, sizeof(SD_CMD_RSP_Buff));
+            /* 固件可能对 0x74005044 连写两次；第二次读到的仍是上次写入的 RSP（高半字 0xDEDE），
+             * 勿当新 CMD 解析，否则会进 unhandled 并冲掉正确 RSP，导致写/删 FAT 失败 */
+            if (((p[0] >> 16) & 0xffffu) == 0xdedeu)
+            {
+                goto sd_cmd_done;
+            }
             // 开始解析SD命令（FCIE 打包格式，未命中时用闲状态避免脏数据）
             if (p[0] == 0x40u && p[1] == 0u && p[2] == 0u)
             {
@@ -1252,18 +1249,9 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             }
             else if (p[0] == 0xff49 && p[1] == 8)
             {
-                /* CSD (legacy match) — same format as CMD9 branch */
+                /* CSD (legacy match) — 容量与 fat32.img 文件一致 */
                 u32 csd_regs[9];
-                my_memset(csd_regs, 0, sizeof(csd_regs));
-                csd_regs[0] = 0x00 | (0x40 << 8);
-                csd_regs[1] = 0x0E | (0x00 << 8);
-                csd_regs[2] = 0x5A | (0x5B << 8);
-                csd_regs[3] = 0x59 | (0x00 << 8);
-                csd_regs[4] = 0x00 | (0x03 << 8);
-                csd_regs[5] = 0xFF | (0x7F << 8);
-                csd_regs[6] = 0x80 | (0x0A << 8);
-                csd_regs[7] = 0x40 | (0x00 << 8);
-                csd_regs[8] = 0x01;
+                sd_fill_csd_v2_regs(csd_regs);
                 uc_mem_write(MTK, 0x74005200, csd_regs, sizeof(csd_regs));
                 goto sd_cmd_done;
             }
@@ -1291,23 +1279,9 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             }
             else if ((p[0] & 0x3f) == 0x09)
             {
-                /* CMD9 (SEND_CSD V2.0 for SDHC 512MB)
-                 * GetCMD_RSP_BUF(j): 偶数j→u32[j/2]的低字节; 奇数j→u32[j/2]的byte[1]
-                 * 故 u32[i] = a2[2*i] | (a2[2*i+1] << 8)
-                 * C_SIZE=0x3FF → (0x3FF+1)<<10 = 1048576 sectors = 512MB
-                 * a2[7..10] big-endian → {0x00,0x00,0x03,0xFF}
-                 */
+                /* CMD9 SEND_CSD V2.0 SDHC — C_SIZE 由 fat32.img 字节数换算 */
                 u32 csd_regs[9];
-                my_memset(csd_regs, 0, sizeof(csd_regs));
-                csd_regs[0] = 0x00 | (0x40 << 8);  /* a2[0]=0x00, a2[1]=0x40(CSD V2.0) */
-                csd_regs[1] = 0x0E | (0x00 << 8);  /* a2[2]=TAAC, a2[3]=NSAC */
-                csd_regs[2] = 0x5A | (0x5B << 8);  /* a2[4]=TRAN_SPEED, a2[5]=CCC high */
-                csd_regs[3] = 0x59 | (0x00 << 8);  /* a2[6]=CCC+READ_BL_LEN, a2[7]=0 */
-                csd_regs[4] = 0x00 | (0x03 << 8);  /* a2[8]=C_SIZE[15:8]=0, a2[9]=0x03 */
-                csd_regs[5] = 0xFF | (0x7F << 8);  /* a2[10]=C_SIZE LSB, a2[11] */
-                csd_regs[6] = 0x80 | (0x0A << 8);  /* a2[12], a2[13] */
-                csd_regs[7] = 0x40 | (0x00 << 8);  /* a2[14], a2[15] */
-                csd_regs[8] = 0x01;                 /* a2[16] */
+                sd_fill_csd_v2_regs(csd_regs);
                 uc_mem_write(MTK, 0x74005200, csd_regs, sizeof(csd_regs));
                 goto sd_cmd_done;
             }
@@ -1339,7 +1313,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 u32 byte_count = blk_cnt * 512;
                 printf("[SD-CMD17/18] sector=%u blk=%u miu=0x%08x dma=0x%08x\n",
                        sector_addr, blk_cnt, miu_addr, dma_addr);
-                u8 *buf = readSDFile((u64)sector_addr * 512, byte_count);
+                u8 *buf = readSDFile((unsigned long long)sector_addr * 512ULL, byte_count);
                 if (buf != NULL)
                 {
                     uc_mem_write(MTK, dma_addr, buf, byte_count);
@@ -1374,9 +1348,23 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 if (dma_buf != NULL)
                 {
                     uc_mem_read(MTK, dma_addr, dma_buf, byte_count);
-                    writeSDFile(dma_buf, sector_addr * 512, byte_count);
+                    writeSDFile(dma_buf, (unsigned long long)sector_addr * 512ULL, byte_count);
                     SDL_free(dma_buf);
                 }
+                SD_CMD_RSP_Buff[0] = 0xdede0000;
+                SD_CMD_RSP_Buff[1] = 0xdede0900;
+                printf("[SD-CMD24/25] sector=%u blk=%u dma=0x%08x\n",
+                       sector_addr, blk_cnt, dma_addr);
+            }
+            else if ((p[0] & 0x3f) == 0x0c)
+            {
+                /* CMD12 (STOP_TRANSMISSION) — 多块传输结束后发送，直接返回 R1 正常响应 */
+                SD_CMD_RSP_Buff[0] = 0xdede0000;
+                SD_CMD_RSP_Buff[1] = 0xdede0900;
+            }
+            else if ((p[0] & 0x3f) == 0x0d)
+            {
+                /* CMD13 (SEND_STATUS) — 返回卡状态正常 */
                 SD_CMD_RSP_Buff[0] = 0xdede0000;
                 SD_CMD_RSP_Buff[1] = 0xdede0900;
             }
@@ -1628,22 +1616,45 @@ void hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_
 
 bool hookInsnInvalid(uc_engine *uc, void *user_data)
 {
-    u32 tmp;
-    u32 Rd;
-    u32 CRn;
-    u32 CRm;
     u32 insn;
     u32 pc;
+    u32 cpsr;
+
+    (void)uc;
+    (void)user_data;
+
     uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
     uc_mem_read(MTK, pc, &insn, 4);
-    if (pc == 0x7C322C)
+
+    /* MRC/MCR 等协处理器指令：静默跳过 */
+    if (pc == 0x7C322C || pc == 0x7C3238)
     {
         printf("mrc指令:%x\n", insn);
+        return 0;
     }
-    else
-        printf("指令无效:%x\n", insn);
-    // 返回true继续
-    // 返回false停止
 
+    /*
+     * CPSR.T=0（ARM 状态）但 PC 指向 Thumb/Thumb-2 代码时会报 UC_ERR_INSN_INVALID。
+     * 根因：中断返回路径（MOV PC,LR 而非 BX LR）、诊断/异常路径互用状态未同步 CPSR.T。
+     * 覆盖所有 16-bit Thumb（如 BDF8 = POP {R3-R7,PC}）和 32-bit Thumb-2：
+     * 只要当前是 ARM（T=0），直接置 T=1 让 Unicorn 以 Thumb 重新解码，最多尝试一次；
+     * 若 Thumb 下仍无效，返回 false 停止模拟。
+     */
+    uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
+    if ((cpsr & 0x20u) == 0u)
+    {
+        static u32 arm_thumb_fix_log = 32u;
+        u32 nc = cpsr | 0x20u;
+        uc_reg_write(MTK, UC_ARM_REG_CPSR, &nc);
+        if (arm_thumb_fix_log > 0u)
+        {
+            arm_thumb_fix_log--;
+            printf("[UC] INSN_INVALID: T=0→1 继续 PC=%08x insn=%08x (mode=%02x)\n",
+                   pc, insn, cpsr & 0x1fu);
+        }
+        return 1;
+    }
+
+    printf("指令无效:%x\n", insn);
     return 0;
 }

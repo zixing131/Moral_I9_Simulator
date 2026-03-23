@@ -64,8 +64,11 @@ void RestoreCpuContext(u32 *stackPtr);
 void renderGdiBufferToWindow(void);
 void Update_RTC_Time(void);
 int utf16_len(char *utf16);
-bool writeSDFile(u8 *Buffer, u32 startPos, u32 size);
-u8 *readSDFile(u32 startPos, u32 size);
+bool writeSDFile(u8 *Buffer, unsigned long long startPos, u32 size);
+u8 *readSDFile(unsigned long long startPos, u32 size);
+/* SDHC CSD：与 fat32.img 文件大小一致（扇区数，1024 对齐） */
+unsigned long sd_get_reported_sectors_for_csd(void);
+void sd_fill_csd_v2_regs(u32 csd_regs[9]);
 void saveFlashFile();
 void readFlashFile();
 void StartCallback(u32 callbackAddr, u32 r0);
