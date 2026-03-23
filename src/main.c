@@ -1744,7 +1744,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     case 0x1DEF62: /* HalUtilPHY2MIUAddr: 记录输入地址，修正结果使 SD 大地址可用 */
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        printf("[PHY2MIU] in=0x%08x\n", tmp1);
+        //printf("[PHY2MIU] in=0x%08x\n", tmp1);
         break;
     }
     case 0x1DEF6C:
