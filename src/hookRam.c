@@ -183,6 +183,39 @@ static void de_blit_to_sdl(u16 dstX, u16 dstY, u16 w, u16 h, u32 cachePitch)
     de_blit_rgb565_to_surface(sfc, Lcd_Cache_Buffer, dstX, dstY, w, h, cachePitch);
 }
 
+/*
+ * 推算 SDL 上的目标左上角坐标。
+ * 固件经代码钩子 0xc166 会更新 Lcd_Update_X/Y，但图标/小块刷新等路径可能不经过该钩子，
+ * 坐标仍为 0，导致画在左上角。若 DE 源地址落在已知主帧缓冲 [Lcd_FullScreen_Ptr, +fb) 内，
+ * 则用相对基址的字节偏移换算 (x,y)；行距优先用 DE_Layer0_Pitch（若合理），否则 240×2。
+ */
+static void de_resolve_blit_dest(u32 srcBuf, u16 *dstX, u16 *dstY)
+{
+    u16 x = (u16)Lcd_Update_X;
+    u16 y = (u16)Lcd_Update_Y;
+
+    if (Lcd_FullScreen_Ptr != 0u && srcBuf >= Lcd_FullScreen_Ptr)
+    {
+        u32 fbBytes = (u32)DE_PANEL_W * (u32)DE_PANEL_H * DE_BPP;
+        if (srcBuf < Lcd_FullScreen_Ptr + fbBytes)
+        {
+            u32 off = srcBuf - Lcd_FullScreen_Ptr;
+            u32 mainPitch = (u32)DE_PANEL_W * DE_BPP;
+            if (DE_Layer0_Pitch >= mainPitch && DE_Layer0_Pitch < 8192u)
+                mainPitch = DE_Layer0_Pitch;
+            y = (u16)(off / mainPitch);
+            x = (u16)((off % mainPitch) / DE_BPP);
+            if (y >= DE_PANEL_H || x >= DE_PANEL_W)
+            {
+                x = (u16)Lcd_Update_X;
+                y = (u16)Lcd_Update_Y;
+            }
+        }
+    }
+    *dstX = x;
+    *dstY = y;
+}
+
 static int de_read_fb(u32 srcAddr, u32 guestPitch, u16 w, u16 h)
 {
     u32 rowBytes = (u32)w * DE_BPP;
@@ -625,7 +658,9 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
 
                 if (de_read_fb(srcBuf, pitch, w, h) == 0)
                 {
-                    de_blit_to_sdl((u16)Lcd_Update_X, (u16)Lcd_Update_Y, w, h, (u32)w * DE_BPP);
+                    u16 dstX, dstY;
+                    de_resolve_blit_dest(srcBuf, &dstX, &dstY);
+                    de_blit_to_sdl(dstX, dstY, w, h, (u32)w * DE_BPP);
                     Lcd_Need_Update = 1;
                 }
 
@@ -636,7 +671,9 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             {
                 if (de_read_fb(srcBuf, pitch, w, h) == 0)
                 {
-                    de_blit_to_sdl((u16)Lcd_Update_X, (u16)Lcd_Update_Y, w, h, (u32)w * DE_BPP);
+                    u16 dstX, dstY;
+                    de_resolve_blit_dest(srcBuf, &dstX, &dstY);
+                    de_blit_to_sdl(dstX, dstY, w, h, (u32)w * DE_BPP);
                     Lcd_Need_Update = 1;
                     De_LastTriggerTime = clock();
                     if (w >= (DE_PANEL_W - 20u) && h >= (DE_PANEL_H - 80u))
