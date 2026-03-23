@@ -49,6 +49,7 @@ u32 UART2_Buf_Idx = 0;
 u8 SD_CMD_L;
 u8 SD_CMD_H;
 u32 SD_CMD_RSP_Buff[8];
+u32 g_sd_dma_phys_addr = 0;  /* MDrvFCIEStorageR 的 a4 参数（原始物理地址） */
 
 u32 SD_CMD_Buff[8];
 u16 SD_CMD_Buff_Idx = 0;
@@ -1251,10 +1252,20 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             }
             else if (p[0] == 0xff49 && p[1] == 8)
             {
-                // CSD
-                SD_CMD_RSP_Buff[0] = 0x01020304;
-                SD_CMD_RSP_Buff[1] = 0x05060708;
-                // printf("hit sd cmd CSD\n");
+                /* CSD (legacy match) — same format as CMD9 branch */
+                u32 csd_regs[9];
+                my_memset(csd_regs, 0, sizeof(csd_regs));
+                csd_regs[0] = 0x00 | (0x40 << 8);
+                csd_regs[1] = 0x0E | (0x00 << 8);
+                csd_regs[2] = 0x5A | (0x5B << 8);
+                csd_regs[3] = 0x59 | (0x00 << 8);
+                csd_regs[4] = 0x00 | (0x03 << 8);
+                csd_regs[5] = 0xFF | (0x7F << 8);
+                csd_regs[6] = 0x80 | (0x0A << 8);
+                csd_regs[7] = 0x40 | (0x00 << 8);
+                csd_regs[8] = 0x01;
+                uc_mem_write(MTK, 0x74005200, csd_regs, sizeof(csd_regs));
+                goto sd_cmd_done;
             }
             else if (p[0] == 0x42 && p[1] == 0)
             {
@@ -1262,6 +1273,112 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 SD_CMD_RSP_Buff[0] = 0x01020304;
                 SD_CMD_RSP_Buff[1] = 0x05060708;
                 // printf("hit sd cmd CID\n");
+            }
+            else if ((p[0] & 0x3f) == 0x06)
+            {
+                /* CMD6 (SWITCH_FUNC) — 返回 64 字节 status 到 DMA 地址 */
+                u16 miu_lo16_c6 = 0, miu_hi16_c6 = 0;
+                uc_mem_read(MTK, 0x74005070, &miu_lo16_c6, 2);
+                uc_mem_read(MTK, 0x74005074, &miu_hi16_c6, 2);
+                u32 dma_addr = (((u32)miu_hi16_c6 << 16) | miu_lo16_c6) + 0xC000000;
+                u8 sw_status[64];
+                my_memset(sw_status, 0, sizeof(sw_status));
+                sw_status[13] = 0x03; /* function group 1: supports HS + default */
+                sw_status[16] = 0x01; /* currently SDR25 */
+                uc_mem_write(MTK, dma_addr, sw_status, 64);
+                SD_CMD_RSP_Buff[0] = 0xdede0000;
+                SD_CMD_RSP_Buff[1] = 0xdede0900;
+            }
+            else if ((p[0] & 0x3f) == 0x09)
+            {
+                /* CMD9 (SEND_CSD V2.0 for SDHC 512MB)
+                 * GetCMD_RSP_BUF(j): 偶数j→u32[j/2]的低字节; 奇数j→u32[j/2]的byte[1]
+                 * 故 u32[i] = a2[2*i] | (a2[2*i+1] << 8)
+                 * C_SIZE=0x3FF → (0x3FF+1)<<10 = 1048576 sectors = 512MB
+                 * a2[7..10] big-endian → {0x00,0x00,0x03,0xFF}
+                 */
+                u32 csd_regs[9];
+                my_memset(csd_regs, 0, sizeof(csd_regs));
+                csd_regs[0] = 0x00 | (0x40 << 8);  /* a2[0]=0x00, a2[1]=0x40(CSD V2.0) */
+                csd_regs[1] = 0x0E | (0x00 << 8);  /* a2[2]=TAAC, a2[3]=NSAC */
+                csd_regs[2] = 0x5A | (0x5B << 8);  /* a2[4]=TRAN_SPEED, a2[5]=CCC high */
+                csd_regs[3] = 0x59 | (0x00 << 8);  /* a2[6]=CCC+READ_BL_LEN, a2[7]=0 */
+                csd_regs[4] = 0x00 | (0x03 << 8);  /* a2[8]=C_SIZE[15:8]=0, a2[9]=0x03 */
+                csd_regs[5] = 0xFF | (0x7F << 8);  /* a2[10]=C_SIZE LSB, a2[11] */
+                csd_regs[6] = 0x80 | (0x0A << 8);  /* a2[12], a2[13] */
+                csd_regs[7] = 0x40 | (0x00 << 8);  /* a2[14], a2[15] */
+                csd_regs[8] = 0x01;                 /* a2[16] */
+                uc_mem_write(MTK, 0x74005200, csd_regs, sizeof(csd_regs));
+                goto sd_cmd_done;
+            }
+            else if ((p[0] & 0x3f) == 0x11 || (p[0] & 0x3f) == 0x12)
+            {
+                /* CMD17 / CMD18 — 从 fat32.img 读数据到 FCIE DMA 缓冲
+                 * HalFcie_SetMiuAddr 用 STRH 写: 0x74005070=低16位, 0x74005074=高16位
+                 * 物理地址 = MIU地址 + 0xC000000
+                 */
+                u16 miu_lo16 = 0, miu_hi16 = 0;
+                u32 blk_cnt = 0;
+                uc_mem_read(MTK, 0x74005070, &miu_lo16, 2);
+                uc_mem_read(MTK, 0x74005074, &miu_hi16, 2);
+                uc_mem_read(MTK, 0x7400502c, &blk_cnt, 4);
+                u32 miu_addr = ((u32)miu_hi16 << 16) | miu_lo16;
+                u32 dma_addr;
+                /* HalUtilPHY2MIUAddr 对低于 0xC000000 的地址返回 0，导致 miu=0；
+                 * 用 MDrvFCIEStorageR 入口捕获的原始物理地址作为回退 */
+                if (g_sd_dma_phys_addr != 0)
+                    dma_addr = g_sd_dma_phys_addr;
+                else if (miu_addr != 0)
+                    dma_addr = miu_addr + 0xC000000;
+                else
+                    dma_addr = 0xC000000;  /* 最后回退，实际上不应出现 */
+                u32 sector_addr = p[1] | (p[2] << 16);
+                blk_cnt &= 0xfff;
+                if (blk_cnt == 0)
+                    blk_cnt = 1;
+                u32 byte_count = blk_cnt * 512;
+                printf("[SD-CMD17/18] sector=%u blk=%u miu=0x%08x dma=0x%08x\n",
+                       sector_addr, blk_cnt, miu_addr, dma_addr);
+                u8 *buf = readSDFile((u64)sector_addr * 512, byte_count);
+                if (buf != NULL)
+                {
+                    uc_mem_write(MTK, dma_addr, buf, byte_count);
+                    SDL_free(buf);
+                }
+                else
+                {
+                    printf("[SD-CMD17] readSDFile failed: sector=%u file_offset=%llu\n",
+                           sector_addr, (unsigned long long)sector_addr * 512);
+                }
+                SD_CMD_RSP_Buff[0] = 0xdede0000;
+                SD_CMD_RSP_Buff[1] = 0xdede0900;
+            }
+            else if ((p[0] & 0x3f) == 0x18 || (p[0] & 0x3f) == 0x19)
+            {
+                /* CMD24 / CMD25 — 写数据到 fat32.img */
+                u16 miu_lo16_wr = 0, miu_hi16_wr = 0;
+                u32 blk_cnt = 0;
+                uc_mem_read(MTK, 0x74005070, &miu_lo16_wr, 2);
+                uc_mem_read(MTK, 0x74005074, &miu_hi16_wr, 2);
+                uc_mem_read(MTK, 0x7400502c, &blk_cnt, 4);
+                u32 miu_addr_wr_val = ((u32)miu_hi16_wr << 16) | miu_lo16_wr;
+                u32 dma_addr = (g_sd_dma_phys_addr != 0)
+                                   ? g_sd_dma_phys_addr
+                                   : (miu_addr_wr_val != 0 ? miu_addr_wr_val + 0xC000000 : 0xC000000);
+                u32 sector_addr = p[1] | (p[2] << 16);
+                blk_cnt &= 0xfff;
+                if (blk_cnt == 0)
+                    blk_cnt = 1;
+                u32 byte_count = blk_cnt * 512;
+                u8 *dma_buf = (u8 *)SDL_malloc(byte_count);
+                if (dma_buf != NULL)
+                {
+                    uc_mem_read(MTK, dma_addr, dma_buf, byte_count);
+                    writeSDFile(dma_buf, sector_addr * 512, byte_count);
+                    SDL_free(dma_buf);
+                }
+                SD_CMD_RSP_Buff[0] = 0xdede0000;
+                SD_CMD_RSP_Buff[1] = 0xdede0900;
             }
             else
             {
@@ -1285,6 +1402,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             // printf("\n");
 
             uc_mem_write(MTK, 0x74005200, SD_CMD_RSP_Buff, 32);
+        sd_cmd_done:
             FICE_Status = 0xffff;
             EnqueueVMEvent(VM_EVENT_MSDC_IRQ, 0, 0);
         }

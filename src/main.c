@@ -720,6 +720,8 @@ void initMtkSimalator()
         }
     }
 
+    /* MT6252 外部 SRAM/PSRAM 可能在 0x04000000 bank */
+    err = uc_mem_map_ptr(MTK, 0x04000000, size_16mb * 4, UC_PROT_ALL, SDL_calloc(1, size_16mb * 4));
     //??
     err = uc_mem_map_ptr(MTK, 0x10000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
     //??
@@ -787,6 +789,9 @@ void initMtkSimalator()
             {0x219848, 0x219849},     /* _MdlTouchscreenGetYCoordination */
             {0x219878, 0x219879},     /* _MdlTouchscreenGetXCoordination */
             {0x219DF0, 0x219DF1},     /* _MdlTouchscreenRepeatADCProcess MsSend return */
+            {0x1DEF62, 0x1DEF63},     /* HalUtilPHY2MIUAddr entry */
+            {0x1DEF6C, 0x1DEF6D},     /* HalUtilPHY2MIUAddr clamp to 0 branch */
+            {0x33370,  0x33371},      /* MDrvFCIEStorageR: capture DMA phys addr */
             {0x30F34A, 0x30F34B},     /* dev_accGetLCDStatus */
             {0x32DFA4, 0x32DFA5},     /* _RtkAssertRoutine */
             {0x34D236, 0x34D237},     /* MsSend POP */
@@ -1467,6 +1472,25 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     //     tmp2 = 2;
     //     uc_reg_write(MTK, UC_ARM_REG_R1, &tmp2);
     //     break;
+    case 0x1DEF62: /* HalUtilPHY2MIUAddr: 记录输入地址，修正结果使 SD 大地址可用 */
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        printf("[PHY2MIU] in=0x%08x\n", tmp1);
+        break;
+    }
+    case 0x1DEF6C: /* HalUtilPHY2MIUAddr 返回0分支 — 仅日志 */
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        printf("[PHY2MIU] clamp! raw_diff=0x%08x\n", tmp1);
+        break;
+    }
+    case 0x33370: /* MDrvFCIEStorageR 入口 — 保存 a4（SD DMA物理地址） */
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp1);
+        g_sd_dma_phys_addr = tmp1;
+        printf("[STG_R_HOOK] a4(phys)=0x%08x\n", tmp1);
+        break;
+    }
     case 0x1a605c:
     case 0x2AE1C:
         printf("ker_assert_func (%x)\n", lastAddress);
