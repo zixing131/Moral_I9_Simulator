@@ -9,10 +9,7 @@ void handleLcdReg(uint64_t address, u32 data, uint64_t value);
 void handleTouchScreenReg(uint64_t address, u32 data, uint64_t value);
 void handleGptReg(uint64_t address, u32 data, uint64_t value);
 
-/*
- * NC 0x20 / act 0x88988001：从 2048B page 中按连续 sector 读主数据到 DMA，并把每 sector 的 8×u16 spare 拼到 CIFD。
- * firstSector: 0..3，sectorCount: 1..4，且 first+count<=4。
- */
+/* NC read：2048B page 内连续 sector → DMA + CIFD spare；first+count≤4 */
 static void nand_nc_read_page_sectors_contig(nandPage2048 *p, u32 dmaPtr, u32 firstSector, u32 sectorCount)
 {
     u32 byteOff;
@@ -78,8 +75,7 @@ static u8 nand_nc_resolve_sector_window(u32 paramSect, u32 sectorInPage, u32 *fi
 
     if (high <= 3u && low >= 1u && low <= 7u && (low & 1u) == 1u)
     {
-        /* 常见编码：0x01/0x03/0x05... 表示连续 1/2/3... 个 sector，
-         * 0x80/0x100/0x180 为 page 内 sector 起点偏移。示例：0x83 => sector1 开始读/写 2 个 sector。 */
+        /* paramSect 高 2bit=起始 sector，低 7bit 奇数 1/3/5…=连续 sector 个数 */
         fs = high;
         ns = (low + 1u) / 2u;
     }
@@ -108,9 +104,9 @@ static u8 nand_nc_resolve_sector_window(u32 paramSect, u32 sectorInPage, u32 *fi
     return 1;
 }
 
-u32 halTimerCnt = 0;              // HalTimerUDelay调用
-u32 halTimerCntMax = 0;           // HalTimerUDelay调用
-u32 DrvTimerStdaTimerGetTick = 0; // DrvTimerStdaTimerGetTick
+u32 halTimerCnt = 0;
+u32 halTimerCntMax = 0;
+u32 DrvTimerStdaTimerGetTick = 0;
 
 u8 de_small_pending = 0;
 
@@ -131,7 +127,7 @@ u32 UART2_Buf_Idx = 0;
 u8 SD_CMD_L;
 u8 SD_CMD_H;
 u32 SD_CMD_RSP_Buff[8];
-u32 g_sd_dma_phys_addr = 0;  /* MDrvFCIEStorageR/W 的 a4 参数（原始物理地址） */
+u32 g_sd_dma_phys_addr = 0;
 
 u32 SD_CMD_Buff[8];
 u16 SD_CMD_Buff_Idx = 0;
@@ -146,16 +142,10 @@ u32 nandFlashSectorSize = 0;
 u32 nandParamSect = 0;
 u32 LCD_CMD_Data = 0;
 
-/*
- * AUX ADC 触摸采样模拟。
- * 固件通过写 0x3400C184 选择 ADC 通道，再读 0x3400C198 取 10-bit 结果。
- * 通道命令：0x711 → X，0xB81 → Y，其余 → 压力值
- */
 static u32 auxadc_last_cmd = 0;
 
 static u8 auxadc_log_count = 0;
 
-/* 固件写入值可能在不同位域带通道号，取多种切片与已知通道表匹配 */
 static u32 auxadc_resolve_channel(u32 cmd)
 {
     u32 i, j;
@@ -184,27 +174,25 @@ static u32 auxadc_get_result(void)
     u32 result;
     switch (cmd12)
     {
-    case 0x711: /* X 坐标通道 */
+    case 0x711:
         result = (touchX < 240u ? touchX : 239u) * 1023u / 240u;
         break;
-    case 0xB81: /* Y 坐标通道 */
+    case 0xB81:
         result = (touchY < 400u ? touchY : 399u) * 1023u / 400u;
         break;
-    case 0x781: /* Z1 压力通道 — 未触摸时返回 0（电路开路无电流），
-                  固件 MdlTouchScreenHandle 的 LABEL_13 据此生成 pen-up */
+    case 0x781:
         result = isTouchDown ? 200u : 0u;
         break;
-    case 0x7B1: /* Z2 压力通道 */
+    case 0x7B1:
         result = isTouchDown ? 600u : 1023u;
         break;
-    case 0x181: /* X 电阻测量通道 (gnXResistance) */
+    case 0x181:
         result = isTouchDown ? 300u : 0u;
         break;
-    case 0x191: /* Y 电阻测量通道 (gYResistance) */
+    case 0x191:
         result = isTouchDown ? 300u : 0u;
         break;
     default:
-        /* 未知通道：有按压时给非饱和值，避免驱动认为开路 */
         result = isTouchDown ? 400u : 0u;
         break;
     }
@@ -221,10 +209,6 @@ static u32 auxadc_get_result(void)
 #define DE_PANEL_H 400u
 #define DE_BPP 2u
 
-/*
- * 简单直接：从 Lcd_Buffer_Ptr 按 Lcd_Update_Pitch（字节行距）整块或逐行读到 Lcd_Cache_Buffer，
- * 然后 blit 到 SDL。不再试图解析 DE Layer0 描述符（此固件下始终返回垃圾值）。
- */
 static u8 de_blit_logged = 0;
 
 static void de_blit_rgb565_to_surface(SDL_Surface *sfc, u8 *srcBuf, u16 dstX, u16 dstY, u16 w, u16 h, u32 cachePitch)
@@ -288,12 +272,6 @@ static void de_blit_to_sdl(u16 dstX, u16 dstY, u16 w, u16 h, u32 cachePitch)
     de_blit_rgb565_to_surface(sfc, Lcd_Cache_Buffer, dstX, dstY, w, h, cachePitch);
 }
 
-/*
- * 推算 SDL 上的目标左上角坐标。
- * 固件经代码钩子 0xc166 会更新 Lcd_Update_X/Y，但图标/小块刷新等路径可能不经过该钩子，
- * 坐标仍为 0，导致画在左上角。若 DE 源地址落在已知主帧缓冲 [Lcd_FullScreen_Ptr, +fb) 内，
- * 则用相对基址的字节偏移换算 (x,y)；行距优先用 DE_Layer0_Pitch（若合理），否则 240×2。
- */
 static void de_resolve_blit_dest(u32 srcBuf, u16 *dstX, u16 *dstY)
 {
     u16 x = (u16)Lcd_Update_X;
@@ -419,11 +397,8 @@ static void de_schedule_deferred_refresh(u32 srcBuf, u32 pitch, u16 w, u16 h)
     de_deferred_h = h;
     De_LastTriggerTime = moral_get_ticks_ms();
 
-    // if (w >= (DE_PANEL_W - 20u) && h >= (DE_PANEL_H - 80u))
-    // {
-        Lcd_FullScreen_Ptr = srcBuf;
-        De_PeriodicRefreshAllowed = 1;
-    // }
+    Lcd_FullScreen_Ptr = srcBuf;
+    De_PeriodicRefreshAllowed = 1;
 }
 
 void de_emulator_flush_pending(void)
@@ -454,10 +429,6 @@ void de_emulator_flush_pending(void)
     w = de_deferred_w;
     h = de_deferred_h;
 
-    /*
-     * 仅当 deferred 是小区域（如光标）时才用 Lcd_FullScreen_Ptr 做全屏背景，避免解锁/刷屏时
-     * 读到「刚切过去还未绘制的」另一缓冲（固件常先清空再绘制，读到清空帧会白屏）。
-     */
     if (Lcd_FullScreen_Ptr >= 0x1000u && Lcd_FullScreen_Ptr < 0x8000000u &&
         (w < (DE_PANEL_W - 20u) || h < (DE_PANEL_H - 80u)))
     {
@@ -481,7 +452,6 @@ void de_emulator_flush_pending(void)
         return;
     }
 
-    /* 全屏时若绝大部分为 0xFFFF（白），多为固件先清空再绘制的中间帧，跳过避免白闪 */
     if (w >= DE_PANEL_W - 20u && h >= DE_PANEL_H - 80u)
     {
         u32 rowBytes = (u32)w * DE_BPP;
@@ -495,10 +465,7 @@ void de_emulator_flush_pending(void)
                 white++;
         }
         if (cnt > 0 && white * 10u >= cnt * 9u)
-        {
-            /* 保持 pending，下一轮再试 */
             return;
-        }
     }
 
     if (w == DE_PANEL_W && h == DE_PANEL_H)
@@ -532,7 +499,6 @@ void de_emulator_periodic_refresh(void)
     if (srcBuf < 0x1000u || srcBuf >= 0x8000000u)
         return;
 
-    /* Validate: probe first 8 bytes to avoid displaying descriptor data */
     {
         u8 probe[8];
         if (uc_mem_read(MTK, srcBuf, probe, 8) == UC_ERR_OK)
@@ -564,38 +530,31 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     u32 *ptr1;
     switch (address)
     {
-    case 0x74006CA8: //
+    case 0x74006CA8:
         if (type == UC_MEM_WRITE)
         {
             if (value == 0x3333)
-            { // 写0x3333 开始SPI数据交互
+            {
                 SPI_CMD_Buf_Idx = 0;
             }
             else if (value == 0x5555)
-            { // 写0x5555 结束SPI数据交互
-
+            {
                 SPI_CMD_Buf_Idx = 0;
             }
         }
         break;
-    case 0x74006C10: // HalPagingSpiBusWrite SPI发送数据状态寄存器
+    case 0x74006C10:
         if (type == UC_MEM_WRITE)
         {
             SPI_CMD_Buf[SPI_CMD_Buf_Idx] = (u8)value;
             SPI_CMD_Buf_Idx++;
         }
         break;
-    case 0x74006C14: // HalPagingSpiBusRead SPI总线接收数据寄存器
+    case 0x74006C14:
         if (type == UC_MEM_READ)
         {
-            if (SPI_CMD_Buf_Idx > 0) // 开始处理命令
+            if (SPI_CMD_Buf_Idx > 0)
             {
-                // printf("HalPagingSpiBusWrite:(%d)", SPI_CMD_Buf_Idx);
-                // for (tmp = 0; tmp < SPI_CMD_Buf_Idx; tmp++)
-                // {
-                //     printf("%02x", SPI_CMD_Buf[tmp]);
-                // }
-                // printf("\n");
                 if (SPI_CMD_Buf_Idx == 3)
                 {
                     if (SPI_CMD_Buf[0] == 0x0 && SPI_CMD_Buf[1] == 0x4 && SPI_CMD_Buf[2] == 0xff)
@@ -610,29 +569,20 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                         SPI_DATA_Buf[1] = 0xff;
                     }
                 }
-                if (SPI_CMD_Buf_Idx == 5 && SPI_CMD_Buf[0] == 0x15)
-                { // 写数据
-                  // u16 *p = &SPI_CMD_Buf[1];
-                  // u16 addr = *p;
-                  // p = &SPI_CMD_Buf[3];
-                  // u16 data = *p;
-                  // printf("[SPI] Addr:%x", addr);
-                  // printf(" Value:%x\n", data);
-                }
             }
             uc_mem_write(MTK, (u32)address, &SPI_DATA_Buf[--SPI_DATA_Buf_Idx], 4);
         }
         break;
-    case 0x74006C30: // HalPagingSpiBusRead 写1开始接收数据
+    case 0x74006C30:
         break;
-    case 0x74006C54: // HalPagingSpiBusRead SPI接收状态寄存器 是否完成接收1字节
+    case 0x74006C54:
         if (type == UC_MEM_READ)
         {
             tmp = 1;
             uc_mem_write(MTK, (u32)address, &tmp, 4);
         }
         break;
-    case 0x74006C58: // HalPagingSpiBusWrite SPI发送状态寄存器 是否完成发送1字节
+    case 0x74006C58:
         if (type == UC_MEM_READ)
         {
             tmp = 1;
@@ -647,14 +597,13 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             uc_mem_write(MTK, (u32)address, &tmp, 4);
         }
         break;
-    case 0x74006480: // HalPllAbbSetSpeed
+    case 0x74006480:
         if (type == UC_MEM_READ)
         {
             tmp = 2;
             uc_mem_write(MTK, (u32)address, &tmp, 4);
         }
         break;
-    // case 0x34002C58: // DrvTimerGlobalTimerGetTick
     case 0x34002C44:
         if (type == UC_MEM_READ)
         {
@@ -663,14 +612,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         }
 
         break;
-        // 不启用硬件定时器
-    // case 0x3400AD14: // HalTimerUDelay
-    //     if (type == UC_MEM_READ)
-    //     {
-    //         value = (1 << 9);
-    //         uc_mem_write(MTK, (u32)address, &value, 4);
-    //     }
-    //     break;
     case 0x34002C04:
         if (type == UC_MEM_WRITE)
         {
@@ -679,46 +620,35 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 halTimerCnt = 0;
             else if (halTimerCnt >= halTimerOutLength)
                 halTimerCnt %= halTimerOutLength;
-            // printf("下一个定时长度：%x\n", halTimerOutLength);
         }
         break;
-    case 0x34002C08: // DrvTimerOstickGetCount
+    case 0x34002C08:
         if (type == UC_MEM_READ)
         {
             uc_mem_write(MTK, address, &halTimerCnt, 4);
         }
         break;
     case 0x34002C2C:
-        if (type == UC_MEM_WRITE) // 写入0x10允许中断
+        if (type == UC_MEM_WRITE)
         {
             if ((value & 0x10) == 0x10)
                 halTimerIntStatus = 1;
         }
         break;
     case 0x34002C34:
-        if (type == UC_MEM_WRITE) // 写入0x10禁止中断
+        if (type == UC_MEM_WRITE)
         {
             if ((value & 0x10) == 0x10)
                 halTimerIntStatus = 0;
         }
         break;
-    case 0x34002c00: // 定时器计数,最大2047,请勿继续改动这里
+    case 0x34002c00:
         if (type == UC_MEM_READ)
         {
             halTimerCnt = halTimerCnt == 0 ? 2047 : 0;
             uc_mem_write(MTK, (u32)address, &halTimerCnt, 4);
         }
         break;
-    // case 0x740031C0:
-    //     if (type == UC_MEM_WRITE)
-    //     {
-    //         printf("[lcd]31c0[%x]\n", value);
-    //         uc_mem_read(MTK, Lcd_Buffer_Ptr, Lcd_Cache_Buffer, Lcd_Update_W * Lcd_Update_H * 2);
-    //         Lcd_Need_Update = 1;
-    //         while (Lcd_Need_Update == 1)
-    //             ;
-    //     }
-    //     break;
     case 0x74003094:
         if (type == UC_MEM_WRITE)
         {
@@ -742,13 +672,8 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         {
             Lcd_Buffer_Ptr &= 0xffff0000;
             Lcd_Buffer_Ptr |= (value & 0xffff);
-            // if (Lcd_Update_W >= DE_PANEL_W && Lcd_Update_H >= DE_PANEL_H &&
-            //     Lcd_Buffer_Ptr >= 0x1000u && Lcd_Buffer_Ptr < 0x8000000u)
-            // {
-                //if (Lcd_FullScreen_Ptr != 0 && Lcd_FullScreen_Ptr != Lcd_Buffer_Ptr)
-                    De_PeriodicRefreshAllowed = 1;
-                Lcd_FullScreen_Ptr = Lcd_Buffer_Ptr;
-            // }
+            De_PeriodicRefreshAllowed = 1;
+            Lcd_FullScreen_Ptr = Lcd_Buffer_Ptr;
         }
         break;
     case 0x74003044:
@@ -784,11 +709,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         if (type == UC_MEM_WRITE)
             DE_Layer0_Pitch = value;
         break;
-        // case 0x74003100:
-        //     if (type == UC_MEM_WRITE)
-        //     {
-        //     }
-        //     break;
     case 0x7400313C:
         if (type == UC_MEM_WRITE)
         {
@@ -809,11 +729,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 break;
             }
 
-            /*
-             * Boot descriptor detection: the first full-screen DE trigger often
-             * points to a layer descriptor table, not pixel data. Remember that
-             * address and skip it on subsequent triggers too.
-             */
             if (de_trigger_cnt == 1 && w >= DE_PANEL_W && h >= DE_PANEL_H)
                 boot_desc_buf = srcBuf;
 
@@ -848,19 +763,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                        de_trigger_cnt, srcBuf, pitch, w, h);
             }
 
-            /*
-             * Tiny-region throttle (e.g. 14×14 touch cursor): on real
-             * hardware the DE DMA + LCD frame sync naturally rate-limit
-             * the cursor redraw loop.  In the emulator the DE completes
-             * instantly and the LCD IRQ triggers the ISR which starts
-             * another draw, creating a tight feedback loop.
-             *
-             * For tiny regions (≤ 20×20) we:
-             *  - set the completion status immediately (no polling delay)
-             *  - throttle the SDL blit to ~30 fps
-             *  - SKIP the LCD IRQ to break the ISR→draw→ISR loop
-             * Larger regions (buttons, panels) get full processing.
-             */
             u8 is_cursor_de = (w <= 20u && h <= 20u);
 
             if (is_cursor_de)
@@ -896,7 +798,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             }
         }
         break;
-    case 0x74003140: // HalDispSWFMarkTrigger / HalDispReset both write here
+    case 0x74003140:
         if (type == UC_MEM_WRITE)
         {
             u32 pc_val;
@@ -926,21 +828,15 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             if (!is_reset)
             {
                 u32 srcBuf = Lcd_Buffer_Ptr;
-                u16 w = (u16)Lcd_Update_W;
-                u16 h = (u16)Lcd_Update_H;
-                // if (w >= DE_PANEL_W && h >= DE_PANEL_H &&
-                //     srcBuf >= 0x1000u && srcBuf < 0x8000000u)
-                // {
-                    Lcd_FullScreen_Ptr = srcBuf;
-                    De_PeriodicRefreshAllowed = 1;
-                // }
+                Lcd_FullScreen_Ptr = srcBuf;
+                De_PeriodicRefreshAllowed = 1;
                 lcd_irq_enqueue_throttled();
             }
             tmp = 0xF00;
             uc_mem_write(MTK, 0x74003148u, &tmp, 4);
         }
         break;
-    case 0x740031A0: // HalDispSetCmdPhase
+    case 0x740031A0:
         if (type == UC_MEM_READ)
         {
             tmp = 3;
@@ -963,45 +859,20 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     case 0x74003050:
         if (type == UC_MEM_WRITE)
         {
-            // LCD Pitch
             Lcd_Update_Pitch = value;
         }
         break;
 
-    case 0x34000424: // chipVersion NC_PlatformInit
+    case 0x34000424:
         if (type == UC_MEM_READ)
         {
-            tmp = 3; // 硬件已完善，不需要软件补丁
+            tmp = 3;
             uc_mem_write(MTK, (u32)address, &tmp, 4);
         }
         break;
-        // case 0x34005000: //  UART1
-        //     if (type == UC_MEM_WRITE)
-        //     {
-        //         UART1_Buf[UART1_Buf_Idx++] = (u8)value;
-        //         if (value == 0xd)
-        //         {
-        //             UART1_Buf[UART1_Buf_Idx++] = 0;
-        //             printf("[uart1]%s", UART1_Buf);
-        //             UART1_Buf_Idx = 0;
-        //         }
-        //     }
-        //     break;
-        // case 0x34005400: // UART2
-        //     if (type == UC_MEM_WRITE)
-        //     {
-        //         UART2_Buf[UART2_Buf_Idx++] = (u8)value;
-        //         if (value == 0xd)
-        //         {
-        //             UART2_Buf[UART2_Buf_Idx++] = 0;
-        //             printf("[uart2]%s", UART2_Buf);
-        //             UART2_Buf_Idx = 0;
-        //         }
-        //     }
-        //     break;
 
-    case 0x3400500C: // hal_uart_debug_init  UART1
-    case 0x3400540C: // UART2
+    case 0x3400500C:
+    case 0x3400540C:
         if (type == UC_MEM_READ)
         {
             tmp = 0x20;
@@ -1018,7 +889,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             }
         }
         break;
-    case 0x34002C10: // reset watch dog
+    case 0x34002C10:
         if (type == UC_MEM_WRITE)
         {
             if (value == 0x11FFF || value == 0x10FFF)
@@ -1031,7 +902,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             }
         }
         break;
-    case NC_MIE_EVENT: // FCIE 状态寄存器
+    case NC_MIE_EVENT:
         if (type == UC_MEM_READ)
         {
             uc_mem_write(MTK, (u32)address, &FICE_Status, 4);
@@ -1046,55 +917,31 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 FICE_Status = value;
         }
         break;
-    case 0x74005004: // FCIE 中断状态寄存器 NC_wait_MIULastDone
+    case 0x74005004:
         if (type == UC_MEM_READ)
         {
-            tmp = 0; // 0x80表示中断完成
+            tmp = 0;
             uc_mem_write(MTK, (u32)address, &tmp, 4);
         }
         break;
-    case 0x74005008: // nan flash control
+    case 0x74005008:
         if (type == UC_MEM_READ)
         {
-            tmp = 0x20; // fifo ready
+            tmp = 0x20;
             uc_mem_write(MTK, (u32)address, &tmp, 4);
         }
         break;
-    case 0x74005028: // NC_wait_MIULastDone
+    case 0x74005028:
         if (type == UC_MEM_READ)
         {
-            tmp = 0x80; // 表示完成
+            tmp = 0x80;
             uc_mem_write(MTK, (u32)address, &tmp, 4);
         }
         break;
-    // case 0x74005074:
-    // case 0x74005070:
-    //     if (type == UC_MEM_WRITE)
-    //     {
-    //         // printf("Set Miu Addr:%x\n", value);
-    //     }
-    //     break;
-    // case 0x74005034:
-    //     if (type == UC_MEM_WRITE)
-    //     {
-    //         SD_CMD_L = value;
-    //         printf("sd cmd low %x\n", value);
-    //     }
-    //     break;
-    // case 0x74005038:
-    //     if (type == UC_MEM_WRITE)
-    //     {
-    //         SD_CMD_H = value;
-    //         printf("sd cmd high %x\n", value);
-    //     }
-    //     break;
     case NC_AUXREG_ADR:
         if (type == UC_MEM_WRITE)
         {
-            // 0x19标识读取ID命令
-            // 0x20读取Block命令
             nandFlashCMD = value;
-            // printf("NC_Config[Column Address]:%x\n", value);
         }
         break;
     case NC_AUXREG_DAT:
@@ -1109,7 +956,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             }
         }
         break;
-    case 0x7400515c: // 写入3 开始重新配置NC_Config()
+    case 0x7400515c:
         if (type == UC_MEM_WRITE)
         {
             if (value == 3)
@@ -1119,26 +966,20 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             }
         }
         break;
-    // case 0xdcf420:
-    // if (type == UC_MEM_WRITE)
-    // {
-    //     printf("Write Flag at %x\n",lastAddress);
-    // }
-    // break;
-    case 0x74003124: // LCD命令低16位,请勿继续改动
+    case 0x74003124:
         if (type == UC_MEM_WRITE)
         {
             LCD_CMD_Data = value;
         }
         break;
-    case 0x74003128: // LCD命令高16位,请勿继续改动
+    case 0x74003128:
         if (type == UC_MEM_WRITE)
         {
             LCD_CMD_Data &= 0xffff;
             LCD_CMD_Data |= (value << 16);
         }
         break;
-    case 0x74003130: // 读取cmd响应
+    case 0x74003130:
         if (type == UC_MEM_READ)
         {
             if (LCD_CMD_Data == 0)
@@ -1152,38 +993,24 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         if (type == UC_MEM_WRITE)
         {
             nandParamSect = value;
-            // nandFlashCmdIdx = 0;
-            // my_memset(nandFlashCMDData, 0, sizeof(nandFlashCMDData));
-            // printf("Write 11c:%x\n", value);
         }
 
         break;
-    // case 0x74003134: // 读取cmd响应
-
-    //     break;
-    case NC_CTRL: // 写入3 读取数据传输开始 写入11 写入数据传输开始 写入1 擦除Block开始
+    case NC_CTRL:
         if (type == UC_MEM_WRITE)
         {
             if ((value & 1) == 1)
             {
                 nand_op_pending = 1;
-                // FICE_Status = 512 | 513; // 完成标志
                 u16 SectorInPage = nandFlashCMDData[0];
                 u32 PhyRowIdx = (nandFlashCMDData[1] | (nandFlashCMDData[2] << 16));
                 u32 destRowIdx = (nandFlashCMDData[4] | (nandFlashCMDData[5] << 16));
                 u32 act = nandFlashCMDData[4] | (nandFlashCMDData[5] << 16);
 
-                // printf("nand>>");
-                // printf("[cmd:%08x]", nandFlashCMD);
-                // printf("[sec:%08x]", SectorInPage);
-                // printf("[pidx:%08x]", PhyRowIdx);
-                // printf("[act:%08x]", act);
-                // printf("[call:%08x]\n", lastAddress);
-
                 if (nandFlashCMD == 0x20)
                 {
 
-                    if (act == 0x88889880) // 读取 sector 数据 nc_read_sectors调用
+                    if (act == 0x88889880)
                     {
                         nandPage512 *pool = (nandPage512 *)NandFlashCard;
                         nandPage512 *p = pool + (PhyRowIdx * 4);
@@ -1193,9 +1020,8 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                             nandSpareBuff[tmp] = p->spareBuff[tmp];
                         }
                         uc_mem_write(MTK, FCIE_NC_RBUF_CIFD_BASE, nandSpareBuff, 32);
-                        // printf("NC_Read_Sec[%08x][%08x][%08x]%d,%d\n", PhyRowIdx, PhyRowIdx * sizeof(nandPage2048), nandDmaBuffPtr, nandFlashCMDData[6], nandFlashCMDData[7]);
                     }
-                    else if (act == 0x88988001) // 读取 page 数据  nc_read_sectors调用
+                    else if (act == 0x88988001)
                     {
                         nandPage2048 *p = ((nandPage2048 *)NandFlashCard) + PhyRowIdx;
 
@@ -1215,10 +1041,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                             nand_nc_read_page_sectors_contig(p, nandDmaBuffPtr, 0, 2);
                         else if (nandParamSect == 0x103u)
                         {
-                            /*
-                             * 与 aux SectorInPage=0x200 等配对：从 page 内字节偏移处连续读 3 个 512B sector。
-                             * 无有效偏移时默认从 sector1 起（与 0x85 常见语义一致）。
-                             */
                             u32 fs = 1u, ns = 3u;
                             if (SectorInPage > 0u && SectorInPage <= 0x600u && (SectorInPage % 512u) == 0u)
                                 fs = SectorInPage / 512u;
@@ -1268,26 +1090,8 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                             }
                         }
                     }
-                    else if (act == 0)
+                    else if (act == 0 || act == 0x8880 || act == 0x810d800a)
                     {
-                        // NC_ResetNandFlash
-                        // printf("act 0 call %x\n", lastAddress);
-                    }
-                    else if (act == 0x8880)
-                    {
-                        // NC_ProbeReadSeq
-                        // printf("act 0x8880 call %x\n", lastAddress);
-                    }
-                    else if (act == 0x810d800a)
-                    {
-                        // nand_erase_blk 一个block = 64 page
-                        // printf("Start NC_Erase_Blk[%x] \n", PhyRowIdx);
-                        // for (u32 cnt = 0; cnt < 32; cnt++)
-                        // {
-                        //     u32 phyIdx = PhyRowIdx + cnt;
-                        //     nandPage2048 *p = ((nandPage2048 *)NandFlashCard) + phyIdx;
-                        //     my_memset(p, 0, sizeof(nandPage2048));
-                        // }
                     }
                     else
                     {
@@ -1300,7 +1104,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                         }
                     }
                 }
-                else if (nandFlashCMD == 0x19) // Read_Id
+                else if (nandFlashCMD == 0x19)
                 {
                     if (act == 0)
                     {
@@ -1320,10 +1124,9 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 {
                     int cmd7 = nandFlashCMDData[7];
 
-                    if (act == 0xb0988001) // nc_read_pages调用
+                    if (act == 0xb0988001)
                     {
                         u16 pageCnt = nandFlashCMDData[7] + 1;
-                        // printf("page cnt: %x\n",pageCnt);
                         for (u32 cnt = 0; cnt < pageCnt; cnt++)
                         {
                             u32 phyIdx = PhyRowIdx + cnt;
@@ -1335,7 +1138,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                                 nandSpareBuff[tmp] = p->spareBuff[tmp];
                             }
                             uc_mem_write(MTK, FCIE_NC_RBUF_CIFD_BASE + (cnt * 128), nandSpareBuff, 128);
-                            // printf("NC_Read_P2k[%08x][%08x][%08x]\n", phyIdx, phyIdx * sizeof(nandPage2048), virtAddr);
                         }
                     }
                     else if (act == 0xd800690)
@@ -1345,35 +1147,20 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                         {
                             u32 phyIdx = PhyRowIdx + cnt;
                             u32 virtAddr = nandDmaBuffPtr + (cnt * 2048);
-                            // printf("NC_Write_P2k[%08x][%08x][%08x]\n", phyIdx, phyIdx * sizeof(nandPage2048), virtAddr);
                             nandPage2048 *p = ((nandPage2048 *)NandFlashCard) + phyIdx;
                             uc_mem_read(MTK, virtAddr, p->pageBuff, 2048);
-                            // uc_mem_read(MTK, FCIE_NC_RBUF_CIFD_BASE + (cnt * 128), nandSpareBuff, 128);
-                            // for (tmp = 0; tmp < 32; tmp++)
-                            // {
-                            //     p->spareBuff[tmp] = nandSpareBuff[tmp];
-                            // }
                         }
                     }
                     else if (cmd7 == 0xa082)
                     {
-                        // PageCopy
                         u32 cntAll = 0;
                         uc_mem_read(MTK, 0x74005110, &cntAll, 4);
                         cntAll += 1;
-                        // printf("Start Nand_PageCopy %x to ", PhyRowIdx);
-                        // printf(" %x ", destRowIdx);
-                        // printf(" buff:%x ", nandDmaBuffPtr);
-                        // printf(" cnt:%x \n", cntAll);
 
                         for (u32 cnt = 0; cnt < cntAll; cnt++)
                         {
                             nandPage2048 *src = ((nandPage2048 *)NandFlashCard) + PhyRowIdx + cnt;
-                            // uc_mem_write(MTK, FCIE_NC_RBUF_CIFD_BASE + (cnt * 128), src->spareBuff, 128);
                             nandPage2048 *dest = ((nandPage2048 *)NandFlashCard) + destRowIdx + cnt;
-                            // uc_mem_write(MTK, nandDmaBuffPtr, src->pageBuff, 2048);
-                            // uc_mem_read(MTK, nandDmaBuffPtr + (cnt * 2048), dest->pageBuff, 2048);
-                            // uc_mem_read(MTK, FCIE_NC_RBUF_CIFD_BASE + (cnt * 128), dest->spareBuff, 128);
                             my_memcpy(dest, src, sizeof(nandPage2048));
                         }
                     }
@@ -1414,68 +1201,46 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             uc_mem_write(MTK, (u32)address, &HalVMMPControl, 4);
         }
         break;
-    // case 0xdcc81c:
-    //     if (type == UC_MEM_WRITE)
-    //     {
-    //         printf("Write EEP ROM at %x\n", lastAddress);
-    //     }
-    //     break;
     case 0x74005044:
         if (type == UC_MEM_WRITE && value != 0)
         {
             uc_mem_read(MTK, 0x74005200, &SD_CMD_Buff, 32);
             u32 *p = SD_CMD_Buff;
             my_memset(SD_CMD_RSP_Buff, 0, sizeof(SD_CMD_RSP_Buff));
-            /* 固件可能对 0x74005044 连写两次；第二次读到的仍是上次写入的 RSP（高半字 0xDEDE），
-             * 勿当新 CMD 解析，否则会进 unhandled 并冲掉正确 RSP，导致写/删 FAT 失败 */
+            /* 连写第二次仍为 0xDEDE RSP，勿当新 CMD 解析（会冲掉 RSP、破坏 FAT） */
             if (((p[0] >> 16) & 0xffffu) == 0xdedeu)
             {
                 goto sd_cmd_done;
             }
-            // 开始解析SD命令（FCIE 打包格式，未命中时用闲状态避免脏数据）
             if (p[0] == 0x40u && p[1] == 0u && p[2] == 0u)
             {
-                /* CMD0 GO_IDLE_STATE — 日志 p0=0x40；RSP 与 CMD8 占位一致供 DrvSD 继续 */
                 SD_CMD_RSP_Buff[0] = 0xdede0000;
                 SD_CMD_RSP_Buff[1] = 0xdede0100;
                 SD_CMD_RSP_Buff[2] = 0xdede005a;
             }
             else if ((p[0] == 0x48) && p[1] == 0x100 && p[2] == 0x5a)
             {
-                // SD_CMD_RSP_Buff[0] = 0xdede0000; // 最后两字节有效
-                // SD_CMD_RSP_Buff[1] = 0xdede0100;
-                // SD_CMD_RSP_Buff[2] = 0xdede005a;
-
-                SD_CMD_RSP_Buff[0] = 0xdede0000; // 最后两字节有效
+                SD_CMD_RSP_Buff[0] = 0xdede0000;
                 SD_CMD_RSP_Buff[1] = 0xdede0100;
                 SD_CMD_RSP_Buff[2] = 0xdede005a;
-
-                // printf("hit sd cmd aa \n");
             }
             else if ((p[0] == 0x4069) && p[1] == 0x8001 && p[2] == 0)
             {
-                SD_CMD_RSP_Buff[0] = 0xdedec000; // ff为c0时代表sdhc
+                SD_CMD_RSP_Buff[0] = 0xdedec000;
                 SD_CMD_RSP_Buff[1] = 0xdede0000;
-                // printf("hit sd cmd ab\n");
             }
-            // APP_CMD //SCR  //?? //Set 4bitmode //SetBusWidth
             else if ((p[0] == 0x77 && p[1] == 0) || (p[0] == 0x73 && p[1] == 0) || (p[0] == 0x377 && p[1] == 8) || (p[0] == 0x347 && p[1] == 8) || (p[0] == 0x46 && p[1] == 0 && p[2] == 2))
             {
-                // APP_CMD
-                SD_CMD_RSP_Buff[0] = 0xdede0000; //[5][4]
+                SD_CMD_RSP_Buff[0] = 0xdede0000;
                 SD_CMD_RSP_Buff[1] = 0xdede0700;
-                // printf("hit sd cmd APP_CMD\n");
             }
             else if (p[0] == 0x43 && p[1] == 0)
             {
-                // RCA
                 SD_CMD_RSP_Buff[0] = 0x01020304;
                 SD_CMD_RSP_Buff[1] = 0x05060708;
-                // printf("hit sd cmd RCA\n");
             }
             else if (p[0] == 0xff49 && p[1] == 8)
             {
-                /* CSD (legacy match) — 容量与 fat32.img 文件一致 */
                 u32 csd_regs[9];
                 sd_fill_csd_v2_regs(csd_regs);
                 uc_mem_write(MTK, 0x74005200, csd_regs, sizeof(csd_regs));
@@ -1483,29 +1248,25 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             }
             else if (p[0] == 0x42 && p[1] == 0)
             {
-                // CID
                 SD_CMD_RSP_Buff[0] = 0x01020304;
                 SD_CMD_RSP_Buff[1] = 0x05060708;
-                // printf("hit sd cmd CID\n");
             }
             else if ((p[0] & 0x3f) == 0x06)
             {
-                /* CMD6 (SWITCH_FUNC) — 返回 64 字节 status 到 DMA 地址 */
                 u16 miu_lo16_c6 = 0, miu_hi16_c6 = 0;
                 uc_mem_read(MTK, 0x74005070, &miu_lo16_c6, 2);
                 uc_mem_read(MTK, 0x74005074, &miu_hi16_c6, 2);
                 u32 dma_addr = (((u32)miu_hi16_c6 << 16) | miu_lo16_c6) + 0xC000000;
                 u8 sw_status[64];
                 my_memset(sw_status, 0, sizeof(sw_status));
-                sw_status[13] = 0x03; /* function group 1: supports HS + default */
-                sw_status[16] = 0x01; /* currently SDR25 */
+                sw_status[13] = 0x03;
+                sw_status[16] = 0x01;
                 uc_mem_write(MTK, dma_addr, sw_status, 64);
                 SD_CMD_RSP_Buff[0] = 0xdede0000;
                 SD_CMD_RSP_Buff[1] = 0xdede0900;
             }
             else if ((p[0] & 0x3f) == 0x09)
             {
-                /* CMD9 SEND_CSD V2.0 SDHC — C_SIZE 由 fat32.img 字节数换算 */
                 u32 csd_regs[9];
                 sd_fill_csd_v2_regs(csd_regs);
                 uc_mem_write(MTK, 0x74005200, csd_regs, sizeof(csd_regs));
@@ -1513,10 +1274,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             }
             else if ((p[0] & 0x3f) == 0x11 || (p[0] & 0x3f) == 0x12)
             {
-                /* CMD17 / CMD18 — 从 fat32.img 读数据到 FCIE DMA 缓冲
-                 * HalFcie_SetMiuAddr 用 STRH 写: 0x74005070=低16位, 0x74005074=高16位
-                 * 物理地址 = MIU地址 + 0xC000000
-                 */
                 u16 miu_lo16 = 0, miu_hi16 = 0;
                 u32 blk_cnt = 0;
                 uc_mem_read(MTK, 0x74005070, &miu_lo16, 2);
@@ -1524,14 +1281,12 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 uc_mem_read(MTK, 0x7400502c, &blk_cnt, 4);
                 u32 miu_addr = ((u32)miu_hi16 << 16) | miu_lo16;
                 u32 dma_addr;
-                /* HalUtilPHY2MIUAddr 对低于 0xC000000 的地址返回 0，导致 miu=0；
-                 * 用 MDrvFCIEStorageR 入口捕获的原始物理地址作为回退 */
                 if (g_sd_dma_phys_addr != 0)
                     dma_addr = g_sd_dma_phys_addr;
                 else if (miu_addr != 0)
                     dma_addr = miu_addr + 0xC000000;
                 else
-                    dma_addr = 0xC000000;  /* 最后回退，实际上不应出现 */
+                    dma_addr = 0xC000000;
                 u32 sector_addr = p[1];
                 blk_cnt &= 0xfff;
                 if (blk_cnt == 0)
@@ -1552,7 +1307,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             }
             else if ((p[0] & 0x3f) == 0x18 || (p[0] & 0x3f) == 0x19)
             {
-                /* CMD24 / CMD25 — 写数据到 fat32.img */
                 u16 miu_lo16_wr = 0, miu_hi16_wr = 0;
                 u32 blk_cnt = 0;
                 uc_mem_read(MTK, 0x74005070, &miu_lo16_wr, 2);
@@ -1583,13 +1337,11 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             }
             else if ((p[0] & 0x3f) == 0x0c)
             {
-                /* CMD12 (STOP_TRANSMISSION) — 多块传输结束后发送，直接返回 R1 正常响应 */
                 SD_CMD_RSP_Buff[0] = 0xdede0000;
                 SD_CMD_RSP_Buff[1] = 0xdede0900;
             }
             else if ((p[0] & 0x3f) == 0x0d)
             {
-                /* CMD13 (SEND_STATUS) — 返回卡状态正常 */
                 SD_CMD_RSP_Buff[0] = 0xdede0000;
                 SD_CMD_RSP_Buff[1] = 0xdede0900;
             }
@@ -1605,14 +1357,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 SD_CMD_RSP_Buff[1] = 0xdede0100;
                 SD_CMD_RSP_Buff[2] = 0xdede005a;
             }
-            // else
-            //     printf("not hit cmd");
-            // printf("[%x]", value);
-            // printf(">>handle sd cmd %x", *p++);
-            // printf(" %x", *p++);
-            // printf(" %x", *p++);
-            // printf(" %x", *p++);
-            // printf("\n");
 
             uc_mem_write(MTK, 0x74005200, SD_CMD_RSP_Buff, 32);
         sd_cmd_done:
@@ -1620,14 +1364,14 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             EnqueueVMEvent(VM_EVENT_MSDC_IRQ, 0, 0);
         }
         break;
-    case 0x74005048: //_HalFcie_SDWaitD0High
+    case 0x74005048:
         if (type == UC_MEM_READ)
         {
             value = 0x100;
             uc_mem_write(MTK, (u32)address, &value, 4);
         }
         break;
-    case 0x740031A8: // lcd HalDispReadDebugCSValue
+    case 0x740031A8:
         if (type == UC_MEM_READ)
         {
             uc_mem_read(MTK, 0x74003000, &value, 4);
@@ -1658,106 +1402,46 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             uc_mem_write(MTK, (u32)address, &value, 4);
         }
         break;
-    // case 0x74005120:
-    //     if (type == UC_MEM_WRITE)
-    //     {
-    //         printf("NC_Config[120]:%x\n", value);
-    //     }
-    //     break;
-    // case 0x74005124:
-    //     if (type == UC_MEM_WRITE)
-    //     {
-    //         printf("NC_Config[124]:%x\n", value);
-    //     }
-    //     break;
-    // case 0x74005140:
-    //     if (type == UC_MEM_WRITE)
-    //     {
-    //         printf("NC_Config[140]:%x\n", value);
-    //     }
-    //     break;
-    // case 0xdd2c80:
-    //     if (type == UC_MEM_WRITE)
-    //     {
-    //         printf("NC_Config SpareBuf: %x \n", lastAddress);
-    //     }
-    //     break;
-    // case 0xdd0c80:
-    //     if (type == UC_MEM_WRITE)
-    //     {
-    //         printf("NC_Config PageBuf: %x \n", lastAddress);
-    //     }
-    //     break;
-    // case FCIE_NC_RBUF_CIFD_BASE: // Nand Flash ID Data?? (共14字节，但是一个字节占用一个寄存器(4字节))
-    //     if (type == UC_MEM_WRITE)
-    //     {
-    //         printf("[nand]write sector data %x\n", lastAddress);
-    //     }
-    //     break;
-    // case 0x3400040C: //_sys_reboot_after_remap
-    //     break;
-    case 0x34001854: // 中断清除
+    case 0x34001854:
         if (type == UC_MEM_WRITE)
         {
-            // IRQ_MASK_SET_L_Data &= (~value);
-            // uc_mem_write(MTK, 0x3400181C, &IRQ_MASK_SET_L_Data, 4);
-            value = 0x1fc; // 设置中断号码大于等于0x40退出中断?
+            value = 0x1fc;
             uc_mem_write(MTK, 0x34001840, &value, 4);
-            // printf("清除中断掩码:%x\n", value);
         }
         break;
-    case 0x34001858: // 中断清除
+    case 0x34001858:
         if (type == UC_MEM_WRITE)
         {
-            // IRQ_MASK_SET_H_Data &= (~value);
-            // uc_mem_write(MTK, 0x34001820, &IRQ_MASK_SET_H_Data, 4);
-            value = 0x1fc; // 设置中断号码大于等于0x40退出中断?
+            value = 0x1fc;
             uc_mem_write(MTK, 0x34001840, &value, 4);
-            //            printf("Clear Pending Irq %x\n", value);
         }
         break;
-    case 0x3400181C: // HalIntcMask 0-31中断掩码
-                     // 0x3400187c
+    case 0x3400181C:
         if (type == UC_MEM_WRITE)
         {
             IRQ_MASK_SET_L_Data = value;
         }
         break;
-    case 0x34001820: // HalIntcMask 32-63中断掩码
-                     // 0x34001880
+    case 0x34001820:
         if (type == UC_MEM_WRITE)
         {
             IRQ_MASK_SET_H_Data = value;
-            // printf("写H中断掩码:%x\n", value);
         }
         break;
-    case 0x3400406C: // HalI2cSendDataStandard
-        // 0x34004010 i2c数据接收寄存器
+    case 0x3400406C:
         if (type == UC_MEM_WRITE)
         {
             if (value & 1)
             {
-                value = 2 | 4 | 8; // 写入2表示发送完毕 写入8表示接收完毕
+                value = 2 | 4 | 8;
                 uc_mem_write(MTK, 0x34004070, &value, 4);
             }
         }
         break;
-    // case 0x3400183C: // 32-63中断号标识位
-    // case 0x34001840: // 0-31中断号标识位
-    //     break;
-    // case 0xdcc7ac:
-    //     if (type == UC_MEM_WRITE)
-    //     {
-    //         printf("写drv nand pageSize:%x\n", value);
-    //         printf("call by %x\n", lastAddress);
-    //     }
-    //     break;
-    // case 0x74005100: // NC_ResetFCIE
-    //     break;
     case 0x74005118:
         if (type == UC_MEM_READ)
         {
-            tmp = 0x40 | 0x80; // 擦除完成状态
+            tmp = 0x40 | 0x80;
             uc_mem_write(MTK, (u32)address, &tmp, 4);
         }
         break;
@@ -1768,10 +1452,9 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             FICE_Status = 0;
         }
         break;
-    case 0xD08DA8: // ConfigRfDone hwlrf_FirstLoadPll
+    case 0xD08DA8:
         if (type == UC_MEM_READ)
         {
-            // todo 完成RF初始化
             value = 2;
             uc_mem_write(MTK, (u32)address, &value, 4);
         }
@@ -1779,26 +1462,13 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     case 0xd0291b:
         if (type == UC_MEM_READ)
         {
-            // todo 完成RF初始化
             value = 5;
             uc_mem_write(MTK, (u32)address, &value, 4);
         }
         break;
-    // case 0x34002C04: // 假如设定了超时就重置计数器
-    //     if (type == UC_MEM_WRITE)
-    //     {
-    //         if (value > 0)
-    //         {
-    //             halTimerOutLength = value;
-    //             printf("time out value:%x\n", halTimerOutLength);
-    //             halTimerCount = 0;
-    //         }
-    //     }
-    //     break;
     default:
         if (address >= 0x3400C080u && address < 0x3400C400u)
         {
-            /* 触摸 AUXADC：命令可能在 C180~C18C，数据读或为半字/字节 */
             if (type == UC_MEM_WRITE && address == 0x3400C184u)
                 auxadc_last_cmd = (u32)value;
             else if (type == UC_MEM_READ && address == 0x3400C198u)
@@ -1830,7 +1500,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             u32 is_wr = (type == UC_MEM_WRITE) ? 1u : 0u;
             handleMsdcReg(address, is_wr, (uint64_t)(uint32_t)value);
         }
-        /* DE register range 0x74003000-0x74005000: no special handling needed */
         break;
     }
 }
@@ -1851,20 +1520,12 @@ bool hookInsnInvalid(uc_engine *uc, void *user_data)
     uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
     uc_mem_read(MTK, pc, &insn, 4);
 
-    /* MRC/MCR 等协处理器指令：静默跳过 */
     if (pc == 0x7C322C || pc == 0x7C3238)
     {
         printf("mrc指令:%x\n", insn);
         return 0;
     }
 
-    /*
-     * CPSR.T=0（ARM 状态）但 PC 指向 Thumb/Thumb-2 代码时会报 UC_ERR_INSN_INVALID。
-     * 根因：中断返回路径（MOV PC,LR 而非 BX LR）、诊断/异常路径互用状态未同步 CPSR.T。
-     * 覆盖所有 16-bit Thumb（如 BDF8 = POP {R3-R7,PC}）和 32-bit Thumb-2：
-     * 只要当前是 ARM（T=0），直接置 T=1 让 Unicorn 以 Thumb 重新解码，最多尝试一次；
-     * 若 Thumb 下仍无效，返回 false 停止模拟。
-     */
     uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
     if ((cpsr & 0x20u) == 0u)
     {

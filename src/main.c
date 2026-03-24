@@ -253,24 +253,16 @@ int ucs2_to_utf8(const unsigned char *in, int ilen, unsigned char *out, int olen
     return length;
 }
 
-/**
- * @brief 按键事件
- * @param type 4=按下 5=松开
- * @param key 按键值
- */
 void keyEvent(int type, int key)
 {
     int simulateKey = -1;
-    // printf("keyboard(%x,type=%d)\n", key, type);
 
     if (key == 0x4000003a && type == 4)
     {
-        // 按下F1导出0x40008000
         isStepNext = 1;
     }
     if (key == 0x4000003b && type == 4)
     {
-        // 按下F2导出0x00008000
         u8 *p = SDL_malloc(size_8mb);
         uc_mem_read(MTK, 0, p, size_8mb);
         writeFile("0x0000.bin", p, size_8mb);
@@ -278,18 +270,15 @@ void keyEvent(int type, int key)
     }
     if (key == 0x4000003c && type == 4)
     {
-        // 按下F3导出0x00008000
         u8 *p = SDL_malloc(size_8mb);
         uc_mem_read(MTK, 0xf0000000, p, size_8mb);
         writeFile("0xf000.bin", p, size_8mb);
         printf("成功导出0xf000.bin\n");
     }
-    // F5导出Cpu信息
     if (key == 0x4000003e && type == 4)
     {
         dumpCpuInfo();
     }
-    // F6 exit
     if (key == 0x4000003f && type == 4)
     {
         EnqueueVMEvent(VM_EVENT_EXIT, 0, 0);
@@ -348,7 +337,6 @@ void keyEvent(int type, int key)
     simulatePress = type == 4 ? 1 : 0;
     if (simulateKey != -1)
     {
-        // printf("smimula ket\n");
         EnqueueVMEvent(VM_EVENT_KEYBOARD, simulateKey, simulatePress);
         simulateKey = -1;
     }
@@ -1091,11 +1079,6 @@ static void moral_uc_write_low_and_xram(const u8 *buf, size_t total)
             printf("[mem] WARN: %u bytes beyond low+XRAM not loaded\n", (unsigned)(total - low_max - rest));
     }
 } 
-/**
- * 初始化模拟 CPU 与内存映射。
- * 目标 SoC：MT6252；外设窗口（0x34/0x74/0x81/0x82/0x90 等）按该系常见布局 + 本固件 IDA。
- * CPU 模型用 Cortex-A9：真机为 ARM926，Unicorn 的 926 模型易触发 UC_ERR_EXCEPTION。
- */
 void initMtkSimalator()
 {
     uc_err err;
@@ -1111,10 +1094,6 @@ void initMtkSimalator()
         printf("Failed on uc_open() with error returned: %u (%s)\n", err, uc_strerror(err));
         return NULL;
     }
-    /*
-     * MT6252 芯片为 ARM926EJ-S，但 Unicorn 的 UC_CPU_ARM_926 对部分 Thumb-2 / 异常路径
-     * 支持不完整，易出现 UC_ERR_EXCEPTION。此处用 Cortex-A9 以跑通本固件（ISA 更宽）。
-     */
     uc_ctl_set_cpu_model(MTK, UC_CPU_ARM_CORTEX_A9);
 
     ROM_MEMPOOL = SDL_malloc(size_16mb);
@@ -1131,9 +1110,7 @@ void initMtkSimalator()
     else
         printf("[mem] Mapped IDA IRAM_SECTION0..RF 0x%08X size=0x%X\n", GUEST_IRAM_SECTION0_BASE,
                (unsigned)GUEST_IRAM_SECTION0_MAP_SIZE);
-    //??
     err = uc_mem_map_ptr(MTK, 0x7000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
-    // 也是一段RAM?
     err = uc_mem_map_ptr(MTK, 0x1000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
 
     if (err)
@@ -1141,7 +1118,6 @@ void initMtkSimalator()
         printf("Failed mem  Rom map: %u (%s)\n", err, uc_strerror(err));
         return NULL;
     }
-    // 一段Internal_Ram内存
     err = uc_mem_map_ptr(MTK, 0x0f000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
     err = uc_mem_map_ptr(MTK, 0x0e000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
     err = uc_mem_map_ptr(MTK, 0x0d000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
@@ -1167,9 +1143,7 @@ void initMtkSimalator()
 
     /* MT6252 外部 SRAM/PSRAM 可能在 0x04000000 bank */
     err = uc_mem_map_ptr(MTK, 0x04000000, size_16mb * 4, UC_PROT_ALL, SDL_calloc(1, size_16mb * 4));
-    //??
     err = uc_mem_map_ptr(MTK, 0x10000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
-    //??
     err = uc_mem_map_ptr(MTK, 0x60000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
 
     err = uc_mem_map_ptr(MTK, 0x50000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
@@ -1195,23 +1169,15 @@ void initMtkSimalator()
     /* KER/BACKTRACE 诊断路径会访问 0x2800xxxx，缺失映射会触发 UC_ERR_MAP */
     err = uc_mem_map_ptr(MTK, 0x28000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
 
-    //??
     err = uc_mem_map_ptr(MTK, 0x74000000, size_4mb, UC_PROT_ALL, SDL_malloc(size_4mb));
-    //??
     err = uc_mem_map_ptr(MTK, 0x34000000, size_4mb, UC_PROT_ALL, SDL_malloc(size_4mb));
-    // LCD控制器寄存器
     err = uc_mem_map_ptr(MTK, 0x90000000, size_4mb, UC_PROT_ALL, SDL_malloc(size_4mb));
     if (err)
     {
         printf("Failed mem  Rom map: %u (%s)\n", err, uc_strerror(err));
         return NULL;
     }
-    /*
-     * MT6252 风格外设地址空间：RTC(0x810b****)、GPT(0x8106****)、AUX 触摸(0x8205****)、
-     * IRQ 旧寄存器(0x8101****)、SDC/SIM 等。此前未映射时 uc_mem_write 无效，
-     * MEM 钩子也不会触发，表现为时间卡在镜像值、触摸/电量逻辑不生效。
-     * 若控制台曾大量出现 hookRamErrorBack「地址无法访问:810xxxxx / 820xxxxx」即此原因。
-     */
+    /* 0x81000000 外设池：RTC / GPT / AUX / IRQ / SDC 等 */
     {
         void *mtk_peri = SDL_malloc(0x02000000);
         if (!mtk_peri)
@@ -1264,7 +1230,7 @@ void initMtkSimalator()
             {0x3B5BA4, 0x3B5BA5},     /* fatal error check */
             {0x3B5C54, 0x3B5C55},     /* KER error */
             {0x7C322C, 0x7C3238},     /* skip mrc instructions */
-            {0xEE9DC, 0xEE9DD},       /* KER trace 后 BKPT/SVC/UDF → UC_ERR_EXCEPTION */
+            {0xEE9DC, 0xEE9DD},       /* LDRH R1,[R1,#34] @ hwll1_ReadE2pParameters → UC_ERR_EXCEPTION */
         };
         for (u32 ri = 0; ri < sizeof(hook_ranges) / sizeof(hook_ranges[0]); ri++)
         {
@@ -1274,10 +1240,6 @@ void initMtkSimalator()
         }
     }
 
-    /* block hook 已不再需要——事件投递改由 count/timeout 中断后的 handleVmEvent_EMU 处理 */
-    // err = uc_hook_add(MTK, &trace[4], UC_HOOK_BLOCK, hookBlockCallBack, 0, 0, 0xefffffff);
-
-    /* 只对 IO 寄存器范围注册 MEM hook，避免每次普通 RAM 读写都调用回调 */
     {
         static uc_hook mem_hooks[24];
         int mi = 0;
@@ -1752,8 +1714,10 @@ char *getRealMemPtr(u32 ptr)
 }
 void hookBlockCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
-    /* 不再使用 block hook 投递事件；改用 uc_emu_start timeout 机制。
-     * 保留空回调以兼容 uc_hook_add 注册。 */
+    (void)uc;
+    (void)address;
+    (void)size;
+    (void)user_data;
 }
 
 /**
@@ -1762,37 +1726,24 @@ void hookBlockCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *use
 
 u8 mssend_pop_log = 0;
 
-/* ker_trace / KER 路径上 PC 落 0xEE9DC 时，单条 Thumb 指令会触发 UC_ERR_EXCEPTION（常见 BKPT/SVC/UDF 等） */
-static void moral_thumb_skip_current_insn(void)
+/* 0xEE9DC: LDRH R1,[R1,#34]，Unicorn 异常 → uc_mem_read 模拟 */
+static void moral_emu_thumb_ldrh_r1_r1_plus34(void)
 {
-    u32 pc_raw, cpsr, tpc, npc;
-    u16 hw1, hw2;
+    u32 base, cpsr, pc_raw, npc, r1_out;
+    u16 v;
+
+    uc_reg_read(MTK, UC_ARM_REG_R1, &base);
+    {
+        u32 ea = base + 34u;
+        if (uc_mem_read(MTK, ea, &v, 2) != UC_ERR_OK)
+            v = 0;
+    }
+    r1_out = (u32)v;
+    uc_reg_write(MTK, UC_ARM_REG_R1, &r1_out);
 
     uc_reg_read(MTK, UC_ARM_REG_PC, &pc_raw);
     uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
-    tpc = pc_raw & ~1u;
-
-    if (uc_mem_read(MTK, tpc, &hw1, 2) != UC_ERR_OK)
-        return;
-
-    u32 ilen;
-    if (cpsr & 0x20u)
-    {
-        u32 top5 = ((u32)hw1 >> 11) & 0x1fu;
-        if (top5 == 0x1du || top5 == 0x1eu || top5 == 0x1fu)
-        {
-            if (uc_mem_read(MTK, tpc + 2u, &hw2, 2) != UC_ERR_OK)
-                return;
-            ilen = 4u;
-            (void)hw2;
-        }
-        else
-            ilen = 2u;
-    }
-    else
-        ilen = 4u;
-
-    npc = tpc + ilen;
+    npc = (pc_raw & ~1u) + 2u;
     if (cpsr & 0x20u)
         npc |= 1u;
     uc_reg_write(MTK, UC_ARM_REG_PC, &npc);
@@ -1965,85 +1916,20 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         break;
     }
-    // case 0x41BF4:
-    //     printf("HalPagingSpiBusTransactionStart %x\n", lastAddress);
-    //     break;
-    // case 0x1DBCB0: // 强制FTL初始化成功
-    //     tmp1 = 0;
-    //     uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-    //     break;
-    // case 0x46a02:
-    //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-    //     uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-    //     printf("_DrvCARDREADER_SetCMD_RSP_BUF %x,%x\n", tmp1, tmp2);
-    //     break;
-    // case 0x46B3E:
-    //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-    //     printf("HalFcieWaitMieEvent:%x\n", &tmp1);
-    //     break;
-    // case 0x1416ce:
-    //     tmp1 = 0;
-    //     uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-    //     printf("CusIsNandEnabled false\n");
-    //     break;
-    // case 0x37DD5E: // 跳过MS_Sleep
-    //     tmp2 = 0x37DD66 + 1;
-    //     uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
-    //     break;
-    // case 0x3B46A: // 强制在中断中清除
-    //     // printf("clear mie flag\n");
-    //     FICE_Status = 0; // 清零
-    //     break;
-    // case 0x1e574:
-    //     uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
-    //     printf("HalDispTransAddr(%x)\n", tmp1);
-    //     // uc_mem_read(MTK, tmp1, Lcd_Cache_Buffer, 240 * 400);
-    //     Lcd_Need_Update = 1;
-    //     break;
-    // case 0x1604A:
-    //     uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
-    //     printf("Read EEP ROM at %x\n", tmp1 + 0x14);
-    //     break;
-    // case 0x1CB84C:
-    //     tmp2 = 1;
-    //     uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
-    //     break;
     case 0xc166:
         uc_reg_read(MTK, UC_ARM_REG_R0, &Lcd_Update_X);
         uc_reg_read(MTK, UC_ARM_REG_R1, &Lcd_Update_Y);
         uc_reg_read(MTK, UC_ARM_REG_R2, &Lcd_Update_W);
         uc_reg_read(MTK, UC_ARM_REG_R3, &Lcd_Update_H);
         break;
-    // case 0x1A6E70:
-    //     tmp2 = 1;
-    //     uc_reg_write(MTK, UC_ARM_REG_R3, &tmp2);
-    //     break;
-    // case 0x1A6E50:
-    //     tmp2 = 2;
-    //     uc_reg_write(MTK, UC_ARM_REG_R3, &tmp2);
-    //     break;
-    // case 0xAB5AC:
-    // case 0xCABA2: // 跳过检测
-    //     tmp2 = 8;
-    //     uc_reg_write(MTK, UC_ARM_REG_R2, &tmp2);
-    //     break;
-    // case 0xAB5B6:
-    // case 0xCABAC: // 跳过检测
-    //     tmp2 = 2;
-    //     uc_reg_write(MTK, UC_ARM_REG_R1, &tmp2);
-    //     break;
-    case 0x1DEF62: /* HalUtilPHY2MIUAddr: 记录输入地址，修正结果使 SD 大地址可用 */
+    case 0x1DEF62: /* HalUtilPHY2MIUAddr */
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        //printf("[PHY2MIU] in=0x%08x\n", tmp1);
         break;
     }
     case 0x1DEF6C:
-    case 0x1DEF6D: /* HalUtilPHY2MIUAddr 越界分支（Thumb 可能 +1） */
+    case 0x1DEF6D: /* HalUtilPHY2MIUAddr 越界；避免 MVNS 得到 -1 误触发 KER */
     {
-        /* IDA: 1def6c MOVS R0,#0 → 1def6e MVNS R0,R0 → 返回 0xFFFFFFFF（不是 0）。
-         * 该值若被当成指针传入 KER_VERROR_DIAGNOSE(0x3B5C54)，R0&0x110000 非 0 会进 fatal error2；
-         * 且 lastAddress 在 switch 末尾才赋值，printf 会误打成「上一条」PC（常见 1def6c）。 */
         static u32 phy_clamp_log;
         if (phy_clamp_log < 4u)
         {
@@ -2106,23 +1992,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         break;
     case 0x1D4B96:
         uc_reg_read(MTK, UC_ARM_REG_R0, &nandDmaBuffPtr);
-        // printf("nand_translate_DMA_address_Ex(%x)\n", nandDmaBuffPtr);
         break;
-    // case 0x37f5ae:
-    //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-    //     uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-    //     uc_mem_read(MTK, tmp1, globalSprintfBuff, 128);
-    //     printf("fms_E2pRead(%s,%x)\n", globalSprintfBuff, tmp2);
-    //     break;
-    // case 0x525e20:
-    //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-    //     uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-    //     uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-    //     uc_mem_read(MTK, tmp1, globalSprintfBuff, 128);
-    //     printf("[vm_log_trace]");
-    //     printf("%s,%x,%x", globalSprintfBuff, tmp2, tmp3);
-    //     printf("\n");
-    //     break;
     case 0x3b5a52 + 1:
 #if MORAL_LOG_KERNEL_TRACE
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
@@ -2141,14 +2011,10 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     case 0x1FE99C:
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
-        // printf("[LOG_SD]");
         uc_mem_read(MTK, tmp1, globalSprintfBuff, 128);
-        //printf("%s,%x", globalSprintfBuff, tmp2);
-        //printf("(call:%x)\n", lastAddress);
         break;
     case 0x3B5A00 + 1:
 #if MORAL_LOG_KERNEL_TRACE
-        /* 原代码两次写入 tmp1，丢失 R0；格式串在 R1，参数在 R2/R3（与 ker_trace 一致） */
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
@@ -2164,65 +2030,8 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         break;
     case 0x36ed44:
     case 0x3b5ba4:
-        /* 原 (R0&0x110000) 在真机上可能筛「坏指针」；模拟器里 0x20xxxxxx 等合法 RAM 常含 bit16→误触发死循环 */
         break;
-    // case 0x12E92:
-    //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-    //     printf("NC_EraseBlk(idx:%x)\n", tmp1);
-    //     break;
-    // case 0xF924:
-    //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-    //     uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-    //     uc_reg_read(MTK, UC_ARM_REG_SP, &tmp3);
-    //     uc_mem_read(MTK, tmp3, &tmp4, 4);
-    //     uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-    //     printf("NC_PageCopy(%x,%x,buff:%x,cnt:%x)\n", tmp1, tmp2, tmp3, tmp4);
-    //     break;
-    // case 0xF938:
-    //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-    //     uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-    //     uc_reg_read(MTK, UC_ARM_REG_SP, &tmp3);
-    //     uc_mem_read(MTK, tmp3, &tmp4, 4);
-    //     printf("NC_ReadSectors(idx:%x,sep:%x,cnt:%x)\n", tmp1, tmp2, tmp4);
-    //     break;
-
-    // case 0x1223C:
-    //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-    //     uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-    //     uc_reg_read(MTK, UC_ARM_REG_SP, &tmp3);
-    //     uc_mem_read(MTK, tmp3, &tmp4, 4);
-    //     printf("NC_WriteSectors(idx:%x,sep:%x,cnt:%x)\n", tmp1, tmp2, tmp4);
-    //     break;
-    // case 0xF916:
-    //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-    //     uc_reg_read(MTK, UC_ARM_REG_R3, &tmp2);
-    //     printf("NC_ReadPages(idx:%x,cnt:%d)(%x)\n", tmp1, tmp2, lastAddress);
-    //     break;
-    // case 0xF908:
-    //     debugType = 10;
-    //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-    //     uc_reg_read(MTK, UC_ARM_REG_R3, &tmp2);
-    //     printf("NC_WritePages(idx:%x,cnt:%d)(%x)\n", tmp1, tmp2, lastAddress);
-    //     break;
-    // case 0x9c68:
-    //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-    //     uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-    //     uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-    //     u32 tt = (tmp1 << 20) >> 28;
-    //     if(tt==0){//g_ptKePadCtrl  0x74006600
-
-    //     }else if(tt==1){//g_ptKeGpioCtrl0 0x74007400
-
-    //     }else if(tt==2){//g_ptKeGpioCtrl1 0x74007600
-
-    //     }else if(tt==3){//g_ptKeGpioCtrl2 0x74007800
-
-    //     }
-
-    //     printf("SetRegValue(%x,%x,%x)\n", tt, tmp2, tmp3);
-    //     break;
-
-    case 0x2cb28: // DrvDMA2DCmdFinish - skip and return success
+    case 0x2cb28: /* DrvDMA2DCmdFinish */
     {
         tmp1 = 1;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
@@ -2230,8 +2039,8 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
         break;
     }
-    case 0x2c55e: // DrvDMA2DIsHWBitBlt - force software path
-    case 0x2c5dc: // DrvDMA2DIsHWFillRect - force software path
+    case 0x2c55e: /* DrvDMA2DIsHWBitBlt → 软路径 */
+    case 0x2c5dc: /* DrvDMA2DIsHWFillRect → 软路径 */
     {
         tmp1 = 0;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
@@ -2239,12 +2048,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
         break;
     }
-    // case 0x1189DA:
-    //     uc_reg_read(MTK, UC_ARM_REG_R2, &tmp1);
-    //     uc_reg_read(MTK, UC_ARM_REG_R5, &tmp2);
-    //     printf("Compare R2<>R5 %x %x\n", tmp1, tmp2);
-    //     break;
-    case 0xA144: // 强制引脚配置正确
+    case 0xA144:
         uc_reg_read(MTK, UC_ARM_REG_R4, &tmp1);
         uc_reg_write(MTK, UC_ARM_REG_R6, &tmp1);
 
@@ -2269,21 +2073,8 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         break;
     }
-    // case 0x28c884:
-    // case 0xbe0c:
-    //     printf("DrvLcdWriteSingleCmd(%x)\n", lastAddress);
-    //     break;
-    // case 0x19c0fa: // DrvDispWriteLcm
-    //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-    //     printf("Cmd(%x)(%x)\n", tmp1, lastAddress);
-    //     break;
-    // case 0x19c112:
-    //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-    //     printf("DrvDispWriteLcmData(%x)(%x)\n", tmp1, lastAddress);
-    //     break;
     case 0x3B5C54:
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        /* 勿再用 (R0&0x110000) 卡死：例如 R0=0x2001001e 为合法 SRAM 指针也会命中 */
         {
             static u32 kerr_cnt = 0;
             kerr_cnt++;
@@ -2301,23 +2092,11 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
             }
         }
         break;
-    // case 0x13C38: // HalClkgenBbtopSetClkSpeed强制返回0
-    //     tmp1 = 0;
-    //     uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-    //     break;
-    // case 0x1A9C:
-    //     uc_reg_read(MTK, UC_ARM_REG_R2, &tmp1);
-    //     uc_reg_write(MTK, UC_ARM_REG_R1, &tmp1);
-    //     break;
-    // case 0x1AA0: // 跳过HalTimerUDelay
-    //     tmp1 = 0;
-    //     uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-    //     break;
-    case 0x7C322C: // 跳过mrc指令
+    case 0x7C322C: /* 跳过 mrc */
         address += 8;
         uc_reg_write(MTK, UC_ARM_REG_PC, &address);
         break;
-    case 0x7C3238: // 跳过tc_loop的mrc
+    case 0x7C3238:
         address += 8;
         uc_reg_write(MTK, UC_ARM_REG_PC, &address);
         break;
@@ -2325,15 +2104,15 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     case 0xEE9DD:
     {
         static u32 moral_ee9dc_log;
-        if (moral_ee9dc_log < 6u)
+        if (moral_ee9dc_log < 4u)
         {
             u32 tpc = (u32)address & ~1u;
             u16 hw = 0;
             moral_ee9dc_log++;
             if (uc_mem_read(MTK, tpc, &hw, 2) == UC_ERR_OK)
-                printf("[UC] skip insn @%08x half=%04x (avoid UC_ERR_EXCEPTION after ker_trace)\n", tpc, hw);
+                printf("[UC] emu LDRH R1,[R1,#34] @%08x half=%04x (hwll1_ReadE2pParameters)\n", tpc, hw);
         }
-        moral_thumb_skip_current_insn();
+        moral_emu_thumb_ldrh_r1_r1_plus34();
         break;
     }
     }
