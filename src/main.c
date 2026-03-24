@@ -1517,8 +1517,8 @@ void RunArmProgram(void *startAddr)
     for (;;)
     {
         int pending_before = moral_vm_has_pending_events();
-        uint64_t timeout_us = pending_before ? 2000u : 100000u;
-        uint64_t instr_count = pending_before ? 20000u : 400000u;
+        uint64_t timeout_us = pending_before ? 4000u : 100000u;
+        uint64_t instr_count = pending_before ? 50000u : 400000u;
         uint64_t start_pc = (uint64_t)(pc & ~1u);
         if (cpsr & 0x20)
             start_pc |= 1;
@@ -2138,6 +2138,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     //     printf("\n");
     //     break;
     case 0x3b5a52 + 1:
+#if MORAL_LOG_KERNEL_TRACE
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         if (tmp1 == 0xe19)
         {
@@ -2149,6 +2150,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
             printf("%s,%x,%x", globalSprintfBuff, tmp1, tmp3);
             printf("\n");
         }
+#endif
         break;
     case 0x1FE99C:
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
@@ -2159,6 +2161,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         //printf("(call:%x)\n", lastAddress);
         break;
     case 0x3B5A00 + 1:
+#if MORAL_LOG_KERNEL_TRACE
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
@@ -2167,6 +2170,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         printf("[KER_VTRACE]");
         printf("%s,%x,%x", globalSprintfBuff, tmp2, tmp3);
         printf("(%x)\n", lastAddress);
+#endif
         break;
     case 0x36ed44:
     case 0x3b5ba4:

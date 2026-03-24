@@ -255,6 +255,11 @@ static void de_blit_rgb565_to_surface(SDL_Surface *sfc, u8 *srcBuf, u16 dstX, u1
                 dst32[xi] = (0xFFu << 24) | ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
             }
         }
+        else if (sfcBpp == 2 && sfc->format->Rmask == 0xF800u && sfc->format->Gmask == 0x07E0u &&
+                 sfc->format->Bmask == 0x001Fu)
+        {
+            memcpy(dstRow, srcRow, (size_t)maxW * 2u);
+        }
         else
         {
             for (u16 xi = 0; xi < maxW; xi++)
@@ -449,7 +454,12 @@ void de_emulator_flush_pending(void)
     w = de_deferred_w;
     h = de_deferred_h;
 
-    if (Lcd_FullScreen_Ptr >= 0x1000u && Lcd_FullScreen_Ptr < 0x8000000u)
+    /*
+     * 仅当 deferred 是小区域（如光标）时才用 Lcd_FullScreen_Ptr 做全屏背景，避免解锁/刷屏时
+     * 读到「刚切过去还未绘制的」另一缓冲（固件常先清空再绘制，读到清空帧会白屏）。
+     */
+    if (Lcd_FullScreen_Ptr >= 0x1000u && Lcd_FullScreen_Ptr < 0x8000000u &&
+        (w < (DE_PANEL_W - 20u) || h < (DE_PANEL_H - 80u)))
     {
         srcBuf = Lcd_FullScreen_Ptr;
         pitch = DE_PANEL_W * DE_BPP;
@@ -469,6 +479,26 @@ void de_emulator_flush_pending(void)
     {
         de_deferred_pending = 0;
         return;
+    }
+
+    /* 全屏时若绝大部分为 0xFFFF（白），多为固件先清空再绘制的中间帧，跳过避免白闪 */
+    if (w >= DE_PANEL_W - 20u && h >= DE_PANEL_H - 80u)
+    {
+        u32 rowBytes = (u32)w * DE_BPP;
+        u32 step = (rowBytes < 16u) ? 2u : 16u;
+        u32 cnt = 0, white = 0;
+        for (u32 off = 0; off < (u32)h * rowBytes && cnt < 64u; off += step)
+        {
+            cnt++;
+            if (off + 1u < (u32)h * rowBytes &&
+                Lcd_Cache_Buffer[off] == 0xFFu && Lcd_Cache_Buffer[off + 1u] == 0xFFu)
+                white++;
+        }
+        if (cnt > 0 && white * 10u >= cnt * 9u)
+        {
+            /* 保持 pending，下一轮再试 */
+            return;
+        }
     }
 
     if (w == DE_PANEL_W && h == DE_PANEL_H)
