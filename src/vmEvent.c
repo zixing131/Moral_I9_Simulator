@@ -185,6 +185,10 @@ int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
                     touch_irq_pending = 1;
             }
             vmIsLock = 0;
+#if MORAL_EMU_DEDICATED_THREAD && MORAL_EMU_UNLIMITED_SLICE
+            if (enqueued && MTK != NULL)
+                uc_emu_stop(MTK);
+#endif
             return enqueued;
         }
         else
@@ -205,6 +209,10 @@ int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
                 printf("WARNING:Max VmEventWaitCount\n");
             }
         }
+#if MORAL_EMU_DEDICATED_THREAD && MORAL_EMU_UNLIMITED_SLICE
+        if (MTK != NULL)
+            uc_emu_stop(MTK);
+#endif
         return 1;
     }
 #ifdef sGDB_SERVER_SUPPORT
@@ -248,7 +256,8 @@ static u32 timer_irq_channel = 14;
 
 int moral_vm_has_pending_events(void)
 {
-    return timer_irq_pending || VmEventCount > 0 || pending_touch_active || touch_irq_pending;
+    return timer_irq_pending || VmEventCount > 0 || pending_touch_active || touch_irq_pending ||
+           touch_adc_pending;
 }
 
 inline void handleVmEvent_EMU(uint64_t address)

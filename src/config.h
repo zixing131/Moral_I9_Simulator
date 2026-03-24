@@ -56,6 +56,39 @@
 #define MORAL_LCD_PERIODIC_REFRESH_MS 0
 #endif
 
+/*
+ * DE 延迟刷新：两次从 Guest 读帧缓冲的最小间隔（毫秒）。
+ * 设为 0 表示不限制（推荐，避免丢帧）。若设 >0，节流时须保留待刷新标志（旧实现曾错误丢弃整次刷新导致严重卡顿）。
+ */
+#ifndef MORAL_DE_FLUSH_MIN_INTERVAL_MS
+#define MORAL_DE_FLUSH_MIN_INTERVAL_MS 0
+#endif
+
+/*
+ * SDL_UpdateWindowSurface 最小间隔（毫秒）。0=每帧可 present（更顺滑，略增 CPU）。
+ */
+#ifndef MORAL_LCD_PRESENT_MIN_INTERVAL_MS
+#define MORAL_LCD_PRESENT_MIN_INTERVAL_MS 0
+#endif
+
+/* 主循环内连续 uc_emu_start 的时间预算（毫秒）；仅当 MORAL_EMU_DEDICATED_THREAD=0 时有效 */
+#ifndef MORAL_EMU_MS_PER_MAIN_ITER
+#define MORAL_EMU_MS_PER_MAIN_ITER 10u
+#endif
+
+/* 1：独立 pthread 跑模拟；0：在主循环里按时间片 uc_emu_start */
+#ifndef MORAL_EMU_DEDICATED_THREAD
+#define MORAL_EMU_DEDICATED_THREAD 1
+#endif
+
+/*
+ * 1：uc_emu_start 使用 timeout=0、count=0（不按时间/条数截断，直到 uc_emu_stop 或出错）。
+ * 主线程入队 VM 事件、HAL 定时器置位等须配合 uc_emu_stop 唤醒（见 vmEvent.c / main.c）。
+ */
+#ifndef MORAL_EMU_UNLIMITED_SLICE
+#define MORAL_EMU_UNLIMITED_SLICE 1
+#endif
+
 #ifndef MORAL_PERF_STATS_INTERVAL_MS
 #define MORAL_PERF_STATS_INTERVAL_MS 0
 #endif

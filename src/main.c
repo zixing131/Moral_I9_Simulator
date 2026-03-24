@@ -23,7 +23,7 @@ static void moral_perf_tick(void);
 
 /*
  * main.c：主程序入口与 Unicorn 生命周期（initMtkSimalator）、SDL 主循环。
- * CPU 模拟与外设 tick（原 emu_thread + screen_render_thread）均在 loop() 单线程内协作运行。
+ * 默认（MORAL_EMU_DEDICATED_THREAD）：模拟在独立 pthread 内 uc_emu_start；UI/外设 tick 在主线程 loop()。
  * hookCodeCallBack：在特定 PC 上于「指令执行前」打桩（RTC、DMA、异常路径等）。
  * hookRam.c 经 #include 并入本翻译单元，负责 UC_HOOK_MEM_* 的 MMIO（DE/FCIE/定时器/触摸等）。
  */
@@ -167,6 +167,11 @@ u32 debugAddress;
 
 SDL_Keycode isKeyDown = SDLK_UNKNOWN;
 bool isMouseDown = false;
+
+#if MORAL_EMU_DEDICATED_THREAD
+pthread_t emu_thread;
+volatile int moral_emu_thread_stop;
+#endif
 
 u8 currentProgramDir[256] = {0};
 
@@ -384,13 +389,6 @@ void mouseEvent(int type, int x, int y)
     EnqueueVMEvent(VM_EVENT_TOUCH_SCREEN_IRQ, type, (x << 16) | y);
 }
 
-/* 单线程：每轮主循环内连续跑模拟的毫秒上限，再处理 SDL，避免窗口卡死 */
-#ifndef MORAL_EMU_MS_PER_MAIN_ITER
-#define MORAL_EMU_MS_PER_MAIN_ITER 5u
-#endif
-
-static u32 s_moral_emu_pc;
-static u32 s_moral_emu_cpsr;
 static int s_moral_emu_halted;
 
 static void moral_emu_on_stop(uc_err p)
@@ -409,6 +407,10 @@ static void moral_emu_on_stop(uc_err p)
 #endif
     s_moral_emu_halted = 1;
 }
+
+#if !MORAL_EMU_DEDICATED_THREAD
+static u32 s_moral_emu_pc;
+static u32 s_moral_emu_cpsr;
 
 static void moral_emu_prepare(void *startAddr)
 {
@@ -459,6 +461,77 @@ static void moral_emu_run_slice(void)
         uc_reg_read(MTK, UC_ARM_REG_CPSR, &s_moral_emu_cpsr);
     }
 }
+#else
+static void *moral_pthread_run_arm(void *arg)
+{
+    RunArmProgram(arg);
+    return NULL;
+}
+
+void RunArmProgram(void *startAddr)
+{
+    u32 pc = (u32)(uintptr_t)startAddr;
+    u32 cpsr = 0;
+    uc_err p = UC_ERR_OK;
+
+#ifdef GDB_SERVER_SUPPORT
+    gdbTarget.running = 1;
+    gdbTarget.breakpoints[gdbTarget.num_breakpoints++] = pc;
+    readAllCpuRegFunc = ReadRegsToGdb;
+    gdb_readMemFunc = readMemoryToGdb;
+#endif
+
+    s_moral_emu_halted = 0;
+    uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
+
+    for (;;)
+    {
+        if (moral_emu_thread_stop)
+            break;
+#ifdef GDB_SERVER_SUPPORT
+        if (gdbTarget.running == 0)
+        {
+            usleep(1000);
+            continue;
+        }
+#endif
+        if (s_moral_emu_halted)
+            break;
+
+        {
+            uint64_t start_pc = (uint64_t)(pc & ~1u);
+            if (cpsr & 0x20)
+                start_pc |= 1;
+
+#if MORAL_EMU_UNLIMITED_SLICE
+            p = uc_emu_start(MTK, start_pc, (uint64_t)-1, 0, 0);
+#else
+            {
+                int pending_before = moral_vm_has_pending_events();
+                uint64_t timeout_us = pending_before ? 4000u : 100000u;
+                uint64_t instr_count = pending_before ? 50000u : 400000u;
+
+                p = uc_emu_start(MTK, start_pc, (uint64_t)-1, timeout_us, (size_t)instr_count);
+            }
+#endif
+        }
+        uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+        uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
+
+        if (p != UC_ERR_OK)
+        {
+            moral_emu_on_stop(p);
+            break;
+        }
+        if (moral_vm_has_pending_events())
+        {
+            handleVmEvent_EMU((uint64_t)pc);
+            uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+            uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
+        }
+    }
+}
+#endif /* MORAL_EMU_DEDICATED_THREAD */
 
 /* 原 MainUpdateTask 每轮一次（去掉独立线程与 usleep） */
 static void moral_mainupdate_tick_once(void)
@@ -508,6 +581,11 @@ static void moral_mainupdate_tick_once(void)
     }
 
     moral_perf_tick();
+
+#if MORAL_EMU_DEDICATED_THREAD && MORAL_EMU_UNLIMITED_SLICE
+    if (timer_irq_pending && MTK != NULL)
+        uc_emu_stop(MTK);
+#endif
 }
 
 void loop()
@@ -515,7 +593,9 @@ void loop()
     SDL_Event ev;
     bool isLoop = true;
 
+#if !MORAL_EMU_DEDICATED_THREAD
     moral_emu_prepare((void *)(uintptr_t)ROM_ADDRESS);
+#endif
 
     while (isLoop)
     {
@@ -558,11 +638,13 @@ void loop()
                 break;
             }
         }
+        /* 先外设/DE 把像素写入 SDL surface，再 present，减少一帧延迟 */
+        moral_mainupdate_tick_once();
+
         if (Lcd_Need_Update)
             renderGdiBufferToWindow();
 
-        moral_mainupdate_tick_once();
-
+#if !MORAL_EMU_DEDICATED_THREAD
         if (!s_moral_emu_halted)
         {
 #ifdef GDB_SERVER_SUPPORT
@@ -580,9 +662,20 @@ void loop()
                 }
             }
         }
+#endif
 
         SDL_Delay(1);
     }
+
+#if MORAL_EMU_DEDICATED_THREAD
+    moral_emu_thread_stop = 1;
+    if (MTK != NULL)
+        uc_emu_stop(MTK);
+    {
+        void *thr_ret;
+        pthread_join(emu_thread, &thr_ret);
+    }
+#endif
 
     if (SD_File_Handle != NULL)
         fclose(SD_File_Handle);
@@ -1714,7 +1807,10 @@ int main(int argc, char *args[])
             printf("[SD] 镜像 CSD 报告容量: %lu 扇区 (~%llu MiB)\n", sec, mb);
         }
 
-        /* CPU 与外设 tick 在 loop() 主线程内运行（单线程模型） */
+#if MORAL_EMU_DEDICATED_THREAD
+        moral_emu_thread_stop = 0;
+        pthread_create(&emu_thread, NULL, moral_pthread_run_arm, (void *)(uintptr_t)ROM_ADDRESS);
+#endif
 #ifdef GDB_SERVER_SUPPORT
         pthread_create(&gdb_server_mutex, NULL, gdb_server_main, NULL);
 #endif

@@ -416,21 +416,23 @@ void de_emulator_flush_pending(void)
     u16 w;
     u16 h;
     uint64_t now;
-    uint64_t min_interval = 1000 / 60;
 
     if (!de_deferred_pending)
         return;
 
-    now = moral_get_ticks_ms();
-    if (min_interval < 1)
-        min_interval = 1;
-    if (de_deferred_last_draw != 0 &&
-        (now - de_deferred_last_draw) < min_interval)
+#if MORAL_DE_FLUSH_MIN_INTERVAL_MS > 0
     {
-        
-        de_deferred_pending = 0;
-        return;
+        uint64_t min_iv = (uint64_t)MORAL_DE_FLUSH_MIN_INTERVAL_MS;
+
+        if (min_iv < 1)
+            min_iv = 1;
+        now = moral_get_ticks_ms();
+        if (de_deferred_last_draw != 0 && (now - de_deferred_last_draw) < min_iv)
+            return; /* 保留 de_deferred_pending，下轮再读 FB；勿丢弃刷新请求 */
     }
+#endif
+
+    now = moral_get_ticks_ms();
 
     srcBuf = de_deferred_src_buf;
     pitch = de_deferred_pitch;
@@ -473,7 +475,10 @@ void de_emulator_flush_pending(void)
                 white++;
         }
         if (cnt > 0 && white * 10u >= cnt * 9u)
+        {
+            de_deferred_pending = 0;
             return;
+        }
     }
 
     if (w == DE_PANEL_W && h == DE_PANEL_H)
@@ -730,13 +735,13 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             static u32 boot_desc_buf = 0;
             de_trigger_cnt++;
 
-            if (w == 0 || h == 0 || srcBuf < 0x1000u || srcBuf >= 0x8000000u)
-            {
-                tmp = 0xF00;
-                uc_mem_write(MTK, 0x74003148u, &tmp, 4);
-                lcd_irq_enqueue_throttled();
-                break;
-            }
+            // if (w == 0 || h == 0 || srcBuf < 0x1000u || srcBuf >= 0x8000000u)
+            // {
+            //     tmp = 0xF00;
+            //     uc_mem_write(MTK, 0x74003148u, &tmp, 4);
+            //     lcd_irq_enqueue_throttled();
+            //     break;
+            // }
 
             if (de_trigger_cnt == 1 && w >= DE_PANEL_W && h >= DE_PANEL_H)
                 boot_desc_buf = srcBuf;
