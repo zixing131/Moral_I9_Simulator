@@ -333,9 +333,10 @@ void keyEvent(int type, int key)
     {
         simulateKey = 22; // 拨号
     }
-    else if (key == 0x63) // c
+    else if (key == 0x63 || key == SDLK_ESCAPE) // c 或 Esc → 挂机/电源键
     {
-        simulateKey = 23; // 挂机
+        EnqueueVMEvent(VM_EVENT_POWER_KEY, (type == 4) ? 1 : 0, 0);
+        return;
     }
 
     else if (key == 0x6e) // n

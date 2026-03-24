@@ -42,7 +42,7 @@ static const KeyScanCode mstarKeyMap[] = {
     [20] = {0, 1}, // KEY_SKLEFT → vkey44 (function key)
     [21] = {4, 2}, // KEY_SKRIGHT → vkey45 (back)
     [22] = {0, 0}, // KEY_SEND (unused on touchscreen)
-    [23] = {0, 0}, // KEY_END → vkey40 (power/end) — uses special (0,0)
+    [23] = {0xFF, 0xFF}, // KEY_END → 走 VM_EVENT_POWER_KEY 专用路径，不走矩阵
 };
 #define MSTAR_KEY_MAP_SIZE (sizeof(mstarKeyMap) / sizeof(mstarKeyMap[0]))
 
