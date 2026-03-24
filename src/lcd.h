@@ -8,6 +8,7 @@
 
 /** 从模拟器 DE/LCD 缓冲区读取整屏并写入 SDL（供 lcdTaskMain 定时调用） */
 void de_emulator_periodic_refresh(void);
+void de_emulator_flush_pending(void);
 
 
 typedef struct _lcdLayer

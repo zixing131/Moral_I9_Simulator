@@ -69,6 +69,8 @@ void lcdTaskMain()
         mtk_touch_regs_sync();
     }
 
+    de_emulator_flush_pending();
+
 #if MORAL_LCD_PERIODIC_REFRESH_MS > 0
     static uint64_t last_de_poll = 0;
     uint64_t threshold = (uint64_t)MORAL_LCD_PERIODIC_REFRESH_MS;

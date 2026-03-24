@@ -382,6 +382,90 @@ static void de_blit_from(u8 *srcCache, u16 dstX, u16 dstY, u16 w, u16 h, u32 cac
     de_blit_rgb565_to_surface(sfc, srcCache, dstX, dstY, w, h, cachePitch);
 }
 
+static u8 de_deferred_pending = 0;
+static u32 de_deferred_src_buf = 0;
+static u32 de_deferred_pitch = 0;
+static u16 de_deferred_w = 0;
+static u16 de_deferred_h = 0;
+static uint64_t de_deferred_last_draw = 0;
+
+static void de_schedule_deferred_refresh(u32 srcBuf, u32 pitch, u16 w, u16 h)
+{
+    de_deferred_pending = 1;
+    de_deferred_src_buf = srcBuf;
+    de_deferred_pitch = pitch;
+    de_deferred_w = w;
+    de_deferred_h = h;
+    De_LastTriggerTime = moral_get_ticks_ms();
+
+    if (w >= (DE_PANEL_W - 20u) && h >= (DE_PANEL_H - 80u))
+    {
+        Lcd_FullScreen_Ptr = srcBuf;
+        De_PeriodicRefreshAllowed = 1;
+    }
+}
+
+void de_emulator_flush_pending(void)
+{
+    u32 srcBuf;
+    u32 pitch;
+    u16 w;
+    u16 h;
+    uint64_t now;
+    uint64_t min_interval = 1000 / 60;
+
+    if (!de_deferred_pending)
+        return;
+
+    now = moral_get_ticks_ms();
+    if (min_interval < 1)
+        min_interval = 1;
+    if (de_deferred_last_draw != 0 &&
+        (now - de_deferred_last_draw) < min_interval)
+        return;
+
+    srcBuf = de_deferred_src_buf;
+    pitch = de_deferred_pitch;
+    w = de_deferred_w;
+    h = de_deferred_h;
+
+    if (Lcd_FullScreen_Ptr >= 0x1000u && Lcd_FullScreen_Ptr < 0x8000000u)
+    {
+        srcBuf = Lcd_FullScreen_Ptr;
+        pitch = DE_PANEL_W * DE_BPP;
+        w = (u16)DE_PANEL_W;
+        h = (u16)DE_PANEL_H;
+    }
+
+    if (srcBuf < 0x1000u || srcBuf >= 0x8000000u || w == 0 || h == 0)
+    {
+        de_deferred_pending = 0;
+        return;
+    }
+    if (pitch == 0u)
+        pitch = (u32)w * DE_BPP;
+
+    if (de_read_fb(srcBuf, pitch, w, h) != 0)
+    {
+        de_deferred_pending = 0;
+        return;
+    }
+
+    if (w == DE_PANEL_W && h == DE_PANEL_H)
+        de_blit_to_sdl(0, 0, w, h, (u32)w * DE_BPP);
+    else
+    {
+        u16 dstX, dstY;
+        de_resolve_blit_dest(srcBuf, &dstX, &dstY);
+        de_blit_to_sdl(dstX, dstY, w, h, (u32)w * DE_BPP);
+    }
+
+    de_deferred_pending = 0;
+    de_deferred_last_draw = now;
+    Lcd_Need_Update = 1;
+    Perf_LcdRefreshCount++;
+}
+
 void de_emulator_periodic_refresh(void)
 {
     if (!De_PeriodicRefreshAllowed)
@@ -755,20 +839,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             }
             else
             {
-                if (de_read_fb(srcBuf, pitch, w, h) == 0)
-                {
-                    u16 dstX, dstY;
-                    de_resolve_blit_dest(srcBuf, &dstX, &dstY);
-                    de_blit_to_sdl(dstX, dstY, w, h, (u32)w * DE_BPP);
-                    Lcd_Need_Update = 1;
-                    Perf_LcdRefreshCount++;
-                    De_LastTriggerTime = moral_get_ticks_ms();
-                    if (w >= (DE_PANEL_W - 20u) && h >= (DE_PANEL_H - 80u))
-                    {
-                        Lcd_FullScreen_Ptr = srcBuf;
-                        De_PeriodicRefreshAllowed = 1;
-                    }
-                }
+                de_schedule_deferred_refresh(srcBuf, pitch, w, h);
                 tmp = 0xF00;
                 uc_mem_write(MTK, 0x74003148u, &tmp, 4);
                 EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
