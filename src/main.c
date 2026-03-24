@@ -372,6 +372,8 @@ void mouseEvent(int type, int x, int y)
     else if (type == MR_MOUSE_UP)
         isTouchDown = 0;
 
+    mtk_touch_regs_sync();
+
     moral_vm_touch_adc_request((u32)x, (u32)y);
 
     if (type == MR_MOUSE_MOVE)
@@ -1422,6 +1424,7 @@ void MainUpdateTask()
 {
     while (1)
     {
+        uint64_t elapsed_ms;
         currentTime = moral_get_ticks_ms();
 
 #ifdef GDB_SERVER_SUPPORT
@@ -1435,19 +1438,31 @@ void MainUpdateTask()
         RtcTaskMain();
         GptTaskMain();
         SimTaskMain();
-        if (currentTime > last_gpt1_interrupt_time)
+
+        if (last_hal_timer_tick_time == 0)
+            last_hal_timer_tick_time = currentTime;
+        elapsed_ms = currentTime - last_hal_timer_tick_time;
+        if (elapsed_ms > 100)
+            elapsed_ms = 100;
+        if (elapsed_ms > 0)
         {
-            last_gpt1_interrupt_time = currentTime + 1;
-            halTimerCnt++;
-            if (halTimerCnt >= halTimerOutLength)
+            last_hal_timer_tick_time = currentTime;
+            halTimerCount += (u32)elapsed_ms;
+
+            if (halTimerOutLength > 0)
             {
-                halTimerCnt = 0;
-                if (halTimerIntStatus == 1)
+                uint64_t next_tick = (uint64_t)halTimerCnt + elapsed_ms;
+                if (next_tick >= (uint64_t)halTimerOutLength)
                 {
-                    timer_irq_pending = 1;
-                    // printf("进入定时中断\n");
+                    halTimerCnt = (u32)(next_tick % (uint64_t)halTimerOutLength);
+                    if (halTimerIntStatus == 1)
+                        timer_irq_pending = 1;
                 }
+                else
+                    halTimerCnt = (u32)next_tick;
             }
+            else
+                halTimerCnt += (u32)elapsed_ms;
         }
         // if (currentTime > last_gpt2_interrupt_time)
         // {

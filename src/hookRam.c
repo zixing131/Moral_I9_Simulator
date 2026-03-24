@@ -546,6 +546,10 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         if (type == UC_MEM_WRITE)
         {
             halTimerOutLength = value & 0xffffff;
+            if (halTimerOutLength == 0)
+                halTimerCnt = 0;
+            else if (halTimerCnt >= halTimerOutLength)
+                halTimerCnt %= halTimerOutLength;
             // printf("下一个定时长度：%x\n", halTimerOutLength);
         }
         break;

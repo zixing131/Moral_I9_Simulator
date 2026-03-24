@@ -7,6 +7,31 @@ u32 SD_READ_ADDR;      // SD文件系统读取地址
 u32 SD_Write_ADDR;     // SD文件系统写入地址
 u8 *msdcDataPtr;
 
+static unsigned long long msdc_cmd_arg_to_file_offset(u32 cmd, u32 arg)
+{
+    switch (cmd)
+    {
+    case SDC_CMD_CMD17:
+    case SDC_CMD_CMD18:
+    case SDC_CMD_CMD24:
+    case SDC_CMD_CMD25:
+        return (unsigned long long)arg * 512ULL;
+    default:
+        return (unsigned long long)arg;
+    }
+}
+
+static void msdc_finish_transfer(void)
+{
+    changeTmp = 0x8000;
+    uc_mem_write(MTK, SDC_DATSTA_REG, &changeTmp, 4);
+    if (vm_dma_msdc_config.transfer_end_interrupt_enable == 1)
+    {
+        vm_dma_msdc_config.transfer_end_interrupt_enable = 0;
+        EnqueueVMEvent(VM_EVENT_MSDC_IRQ, 0, 0);
+    }
+}
+
 void handleMsdcReg(uint64_t addr, u32 data, uint64_t value)
 {
     u32 tmp;
@@ -73,8 +98,8 @@ void handleMsdcReg(uint64_t addr, u32 data, uint64_t value)
             break;
         case SDC_CMD_CMD13: // 查询 SD 卡的状态，并返回卡的当前状态信息
             // printf("SD卡 查询SD卡状态(%x)\n", SEND_SDDATA_CACHE);
-            // 0x100 = R1_READY_FOR_DATA_8
-            tmp = 0x100;
+            // READY_FOR_DATA + TRAN state
+            tmp = 0x900;
             uc_mem_write(MTK, SD_DATA_RESP_REG0, &tmp, 4);
             break;
         case SDC_CMD_CMD16: // 该命令用于设置数据块的长度
@@ -85,43 +110,44 @@ void handleMsdcReg(uint64_t addr, u32 data, uint64_t value)
         case SDC_CMD_CMD17: // 读取单个数据块
             if (vm_dma_msdc_config.config_finish == 1)
             {
-                msdcDataPtr = readSDFile(vm_dma_msdc_config.MSDC_DATA_ADDR, vm_dma_msdc_config.transfer_count);
+                unsigned long long file_offset = msdc_cmd_arg_to_file_offset(SDCMD_CACHE, vm_dma_msdc_config.MSDC_DATA_ADDR);
+                msdcDataPtr = readSDFile(file_offset, vm_dma_msdc_config.transfer_count);
                 if (msdcDataPtr != NULL)
                 {
                     uc_mem_write(MTK, vm_dma_msdc_config.data_addr, msdcDataPtr, vm_dma_msdc_config.transfer_count);
                     SDL_free(msdcDataPtr);
                 }
                 vm_dma_msdc_config.config_finish = 0;
-                changeTmp = 0x8000;
-                uc_mem_write(MTK, SDC_DATSTA_REG, &changeTmp, 4);
-                if (vm_dma_msdc_config.transfer_end_interrupt_enable == 1)
-                {
-                    vm_dma_msdc_config.transfer_end_interrupt_enable = 0;
-                    EnqueueVMEvent(VM_EVENT_MSDC_IRQ, 0, 0);
-                }
+                msdc_finish_transfer();
             }
             break;
         case SDC_CMD_CMD25: // 写多个数据块
         case SDC_CMD_CMD24: // 写单个数据块
             if (vm_dma_msdc_config.config_finish == 1)
             {
+                unsigned long long file_offset = msdc_cmd_arg_to_file_offset(SDCMD_CACHE, vm_dma_msdc_config.MSDC_DATA_ADDR);
                 vm_dma_msdc_config.config_finish = 0;
                 uc_mem_read(MTK, vm_dma_msdc_config.data_addr, vm_dma_msdc_config.cacheBuffer, vm_dma_msdc_config.transfer_count);
-                writeSDFile(vm_dma_msdc_config.cacheBuffer, vm_dma_msdc_config.MSDC_DATA_ADDR, vm_dma_msdc_config.transfer_count);
-                changeTmp = 0x8000;
-                uc_mem_write(MTK, SDC_DATSTA_REG, &changeTmp, 4);
-                if (vm_dma_msdc_config.transfer_end_interrupt_enable == 1)
-                {
-                    vm_dma_msdc_config.transfer_end_interrupt_enable = 0;
-                    EnqueueVMEvent(VM_EVENT_MSDC_IRQ, 0, 0);
-                }
+                writeSDFile(vm_dma_msdc_config.cacheBuffer, file_offset, vm_dma_msdc_config.transfer_count);
+                msdc_finish_transfer();
             }
             break;
         case SDC_CMD_ACMD42: // 卡检测信号通常用于检测 SD 卡是否插入或取出
             // printf("SD卡 检查是否插入或取出(%x)\n", SEND_SDDATA_CACHE);
             break;
         case SDC_CMD_ACMD51: // 请求 SD 卡返回其 SCR (SD Card Configuration Register)寄存器
-            // printf("SD卡 读取SCR寄存器(%x)\n", SEND_SDCMD_CACHE);
+            if (vm_dma_msdc_config.config_finish == 1)
+            {
+                static const u8 sd_scr_data[8] = {0x02, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+                u32 copy_len = vm_dma_msdc_config.transfer_count;
+                vm_dma_msdc_config.config_finish = 0;
+                if (copy_len > sizeof(sd_scr_data))
+                    copy_len = sizeof(sd_scr_data);
+                my_memset(vm_dma_msdc_config.cacheBuffer, 0, sizeof(vm_dma_msdc_config.cacheBuffer));
+                my_memcpy(vm_dma_msdc_config.cacheBuffer, (void *)sd_scr_data, copy_len);
+                uc_mem_write(MTK, vm_dma_msdc_config.data_addr, vm_dma_msdc_config.cacheBuffer, vm_dma_msdc_config.transfer_count);
+                msdc_finish_transfer();
+            }
             break;
         default:
             // printf("未处理SD_DATA_RESP_REG_0(%x,CMD:%x)", SEND_SDDATA_CACHE, SEND_SDCMD_CACHE);

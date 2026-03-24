@@ -491,7 +491,8 @@ void handleCmdLogic(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, u32 data_count, u
         uc_mem_write(MTK, SIM2_SW1_REG, &tmp1, 4);
         uc_mem_write(MTK, SIM2_SW2_REG, &tmp2, 4);
     }
-    sim_dev->selected_file_id = ((u16)sim_dev->T0RxData[0] << 8) | sim_dev->T0RxData[1];
+    if (!isC0Ins && data_count >= 7)
+        sim_dev->selected_file_id = ((u16)sim_dev->T0RxData[data_count - 2] << 8) | sim_dev->T0RxData[data_count - 1];
     sim_dev->T0EndRxDataLen = tmp2;
     sim_dev->irq_channel = SIM_IRQ_T0END; // 进入中断使接收命令完成，等待设备开启DMA接收响应数据
     sim_dev->irq_start = true;

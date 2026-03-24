@@ -100,6 +100,7 @@ static void moral_touch_mmi_ram_patch(void)
 void mtk_touch_regs_sync(void)
 {
     u32 tmp;
+    uint64_t now;
     if (MTK == NULL)
         return;
     u32 sx = touchX;
@@ -128,11 +129,21 @@ void mtk_touch_regs_sync(void)
         uc_mem_write(MTK, MTK_TP_REG_Z, &tmp, 4);
     }
 
-    static u8 patch_done = 0;
-    if (!patch_done)
+    now = moral_get_ticks_ms();
     {
-        patch_done = 1;
-        moral_touch_mmi_ram_patch();
+        static uint64_t last_patch_ms = 0;
+        static u32 last_touch_state = 0xffffffffu;
+        if (last_patch_ms == 0 || (now - last_patch_ms) >= 250u || last_touch_state != isTouchDown)
+        {
+            moral_touch_mmi_ram_patch();
+            last_patch_ms = now;
+            last_touch_state = isTouchDown;
+        }
+    }
+
+    if (isTouchDown)
+    {
+        moral_touch_on_pen_down();
     }
 }
 
