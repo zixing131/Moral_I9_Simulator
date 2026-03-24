@@ -393,6 +393,10 @@ inline void handleVmEvent_EMU(uint64_t address)
                     tmp = (1 << 3) | 1;
                     uc_mem_write(MTK, 0x7400314C, &tmp, 4);
                 }
+                else
+                {
+                    EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
+                }
                 break;
             case VM_EVENT_DMA_IRQ:
                 if (StartInterrupt(23 + 32, address))

@@ -810,7 +810,7 @@ volatile int de_guest_fb_pull_requested;
 volatile int de_periodic_fb_pull_requested;
 #endif
 
-static u8 s_lcd_host_blit_pending;
+static volatile u8 s_lcd_host_blit_pending;
 static u16 s_lcd_host_blit_dstX;
 static u16 s_lcd_host_blit_dstY;
 static u16 s_lcd_host_blit_w;

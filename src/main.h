@@ -201,13 +201,13 @@ u32 Lcd_Update_W;
 u32 Lcd_Update_H;
 u8 Lcd_Cache_Buffer[240 * 400 * 4];
 u8 Lcd_Periodic_Buffer[240 * 400 * 4];
-u8 Lcd_Need_Update = 0;
+volatile u8 Lcd_Need_Update = 0;
 /* emu 线程写 Lcd_Cache_Buffer，主线程读 Lcd_Cache_Buffer → 用此锁保护，消除撕裂 */
 pthread_mutex_t g_lcd_frame_mutex;
 /** 由 0x7400313C 首次成功刷屏后置 1；此前禁止周期性显存拉取 */
-u8 De_PeriodicRefreshAllowed;
+volatile u8 De_PeriodicRefreshAllowed;
 /** DE trigger 触发时记录时间，周期性刷新在近期有 DE 活动时跳过 */
-uint64_t De_LastTriggerTime;
+volatile uint64_t De_LastTriggerTime;
 
 /*
  * IDA HalDispSetBufInfo 图层寄存器映射（完全对应 IDA 命名）：
