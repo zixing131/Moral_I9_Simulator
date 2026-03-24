@@ -677,23 +677,26 @@ static int de_layer_geo_ok(u32 w, u32 h)
     return w >= 1u && w <= 1024u && h >= 1u && h <= 1024u;
 }
 
-/* 判断某层是否是 PIP 子层（W×H 明显小于主层，非全屏） */
-static int de_is_pip_sized(u32 w, u32 h)
+/*
+ * 判断某个子层是否应该参与合成。
+ * Layer1 的寄存器在固件只用一层时会残留旧值（前一帧的 Layer0 地址），
+ * 不能仅靠"地址有效且≠当前主层"来判断——需要更可靠的激活信号。
+ * 使用 HalDispSetPIP 写入的 PIP 位置寄存器（0x740030A0..CC）作为判据：
+ * 如果 PIP 的 w/h（endX-startX, endY-startY）有效且 >0，才认为该层被激活。
+ */
+static int de_pip_is_active(u16 *pip)
 {
-    /* 全屏或接近全屏（>= 主层 80% 面积）视为主层备份，不叠加 */
-    if (w >= (u32)(DE_PANEL_W - 20u) && h >= (u32)(DE_PANEL_H - 80u))
-        return 0;
-    return de_layer_geo_ok(w, h);
+    u16 x1 = pip[0], y1 = pip[1], x2 = pip[2], y2 = pip[3];
+    return (x2 > x1 && y2 > y1 && x2 <= DE_PANEL_W && y2 <= DE_PANEL_H);
 }
 
 static int de_multilayer_composite_needed(void)
 {
-    /* PIP 子层：地址有效、不与主层同址、且尺寸明显小于全屏（非备用主层） */
-    if (DE_Layer1_Ptr >= 0x1000u && DE_Layer1_Ptr != DE_Layer0_Ptr && de_is_pip_sized(DE_Layer1_W, DE_Layer1_H))
+    if (DE_Layer1_Ptr >= 0x1000u && de_layer_geo_ok(DE_Layer1_W, DE_Layer1_H) && de_pip_is_active(DE_PipLayer1))
         return 1;
-    if (DE_Layer2_Ptr >= 0x1000u && DE_Layer2_Ptr != DE_Layer0_Ptr && de_is_pip_sized(DE_Layer2_W, DE_Layer2_H))
+    if (DE_Layer2_Ptr >= 0x1000u && de_layer_geo_ok(DE_Layer2_W, DE_Layer2_H) && de_pip_is_active(DE_PipLayer2))
         return 1;
-    if (DE_Layer3_Ptr >= 0x1000u && DE_Layer3_Ptr != DE_Layer0_Ptr && de_is_pip_sized(DE_Layer3_W, DE_Layer3_H))
+    if (DE_Layer3_Ptr >= 0x1000u && de_layer_geo_ok(DE_Layer3_W, DE_Layer3_H) && de_pip_is_active(DE_PipLayer3))
         return 1;
     return 0;
 }
@@ -722,23 +725,23 @@ static int de_read_fb_composite_into(u8 *dst, u32 dstCap)
     if (de_read_guest_layer_to_panel(dst, row, DE_PANEL_W, DE_PANEL_H, mainBase, mainPitch, gw, gh) != 0)
         return -1;
 
-    /* PIP Layer1 (IDA a1=1)：仅在明显是 PIP 小层时叠加 */
-    if (DE_Layer1_Ptr >= 0x1000u && DE_Layer1_Ptr != mainBase && de_is_pip_sized(DE_Layer1_W, DE_Layer1_H))
+    /* Layer1 (IDA a1=1)：仅在 PIP 位置寄存器被激活时叠加 */
+    if (DE_Layer1_Ptr >= 0x1000u && DE_Layer1_Ptr != mainBase &&
+        de_layer_geo_ok(DE_Layer1_W, DE_Layer1_H) && de_pip_is_active(DE_PipLayer1))
         de_merge_layer_rgb565_into(dst, row, DE_Layer1_Ptr,
                                    de_pitch_or_default(DE_Layer1_Pitch, DE_Layer1_W),
                                    (u16)DE_Layer1_W, (u16)DE_Layer1_H,
                                    DE_PipLayer1, DE_CKey1, DE_AlphaHw[0]);
-    /* PIP Layer2 (IDA a1=2) */
+    /* Layer2 (IDA a1=2) */
     if (DE_Layer2_Ptr >= 0x1000u && DE_Layer2_Ptr != mainBase &&
-        DE_Layer2_Ptr != DE_Layer1_Ptr && de_is_pip_sized(DE_Layer2_W, DE_Layer2_H))
+        de_layer_geo_ok(DE_Layer2_W, DE_Layer2_H) && de_pip_is_active(DE_PipLayer2))
         de_merge_layer_rgb565_into(dst, row, DE_Layer2_Ptr,
                                    de_pitch_or_default(DE_Layer2_Pitch, DE_Layer2_W),
                                    (u16)DE_Layer2_W, (u16)DE_Layer2_H,
                                    DE_PipLayer2, DE_CKey2, DE_AlphaHw[1]);
-    /* PIP Layer3 (IDA a1=3) */
+    /* Layer3 (IDA a1=3) */
     if (DE_Layer3_Ptr >= 0x1000u && DE_Layer3_Ptr != mainBase &&
-        DE_Layer3_Ptr != DE_Layer1_Ptr && DE_Layer3_Ptr != DE_Layer2_Ptr &&
-        de_is_pip_sized(DE_Layer3_W, DE_Layer3_H))
+        de_layer_geo_ok(DE_Layer3_W, DE_Layer3_H) && de_pip_is_active(DE_PipLayer3))
         de_merge_layer_rgb565_into(dst, row, DE_Layer3_Ptr,
                                    de_pitch_or_default(DE_Layer3_Pitch, DE_Layer3_W),
                                    (u16)DE_Layer3_W, (u16)DE_Layer3_H,
@@ -1742,10 +1745,11 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
 
             if (de_trigger_cnt <= 50 || (de_trigger_cnt % 200) == 0)
             {
-                printf("[DE-trigger] #%u src=0x%x w=%u h=%u pitch=%u | updXY=(%u,%u) updWH=(%u,%u) | FSP=0x%x FSP2=0x%x\n",
+                printf("[DE-trigger] #%u src=0x%x w=%u h=%u p=%u | L1=0x%x %u×%u L2=0x%x %u×%u | comp=%d FSP=0x%x\n",
                        de_trigger_cnt, srcBuf, w, h, pitch,
-                       Lcd_Update_X, Lcd_Update_Y, Lcd_Update_W, Lcd_Update_H,
-                       Lcd_FullScreen_Ptr, Lcd_FullScreen_Ptr2);
+                       DE_Layer1_Ptr, DE_Layer1_W, DE_Layer1_H,
+                       DE_Layer2_Ptr, DE_Layer2_W, DE_Layer2_H,
+                       de_multilayer_composite_needed(), Lcd_FullScreen_Ptr);
             }
 
             de_try_snapshot_fb_at_de_trigger(srcBuf, pitch, w, h, 0);
