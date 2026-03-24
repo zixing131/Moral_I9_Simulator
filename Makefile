@@ -11,4 +11,4 @@ SDL2 = Lib/sdl2-2.0.10
 # -mwindows 关闭控制台窗口
 # -lwinhttp http通信库
 build:
-	$(CC) src/main.c -o bin/main.exe -g -lpthread -lm -lmingw32 -lkernel32 -Wall -lws2_32 -DNETWORK_SUPPORT $(UNICORN) -L$(SDL2)/lib/ -lSDL2main -lSDL2
+	$(CC) src/main.c -o bin/main.exe -g -lpthread -lm -lmingw32 -lkernel32 -lwinmm -Wall -lws2_32 -DNETWORK_SUPPORT $(UNICORN) -L$(SDL2)/lib/ -lSDL2main -lSDL2

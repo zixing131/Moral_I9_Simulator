@@ -11,6 +11,10 @@
 #include "defined.h"
 #include "config.h"
 #include "keypad.h"
+#ifdef _WIN32
+#include <windows.h>
+#include <mmsystem.h>
+#endif
 
 static inline uint64_t moral_get_ticks_ms(void)
 {
@@ -54,6 +58,8 @@ static inline void SDL_PutPixel32(SDL_Surface *s, unsigned x, unsigned y, Uint32
  * 0-1024 为栈空间
  * 1024-4096为代码空间
  */
+/* Guest 虚拟地址 → Host 指针（由 initMtkSimalator 注册，用于帧缓冲直接 memcpy） */
+u8 *moral_guest_to_host(u32 gva, u32 nbytes);
 char *getRealMemPtr(u32 ptr);
 void SimulateMstarPressKey(u8, u8);
 #if MORAL_EMU_DEDICATED_THREAD

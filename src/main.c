@@ -196,6 +196,39 @@ u32 size_2kb = 1024 * 2;
 /* initMtkSimalator 里 IDA XRAM 后备缓冲首址，供 Find* 在映像溢出段扫 magic */
 static u8 *s_ida_xram_host = NULL;
 
+/* -----------------------------------------------------------------------
+ * Guest 虚拟地址 → Host 指针映射表
+ * 在 initMtkSimalator 的每次 uc_mem_map_ptr 后注册，供 hookRam.c 做
+ * 帧缓冲直接 memcpy（避免 uc_mem_read 开销）。
+ * ----------------------------------------------------------------------- */
+#define MORAL_MEM_REGION_MAX 32
+typedef struct { u32 base; u32 size; u8 *host; } MoralMemRegion;
+static MoralMemRegion s_moral_mem[MORAL_MEM_REGION_MAX];
+static int s_moral_mem_cnt = 0;
+
+static void moral_mem_region_add(u32 gva, u32 sz, void *host)
+{
+    if (s_moral_mem_cnt < MORAL_MEM_REGION_MAX)
+    {
+        s_moral_mem[s_moral_mem_cnt].base = gva;
+        s_moral_mem[s_moral_mem_cnt].size = sz;
+        s_moral_mem[s_moral_mem_cnt].host = (u8 *)host;
+        s_moral_mem_cnt++;
+    }
+}
+
+u8 *moral_guest_to_host(u32 gva, u32 nbytes)
+{
+    int i;
+    for (i = 0; i < s_moral_mem_cnt; i++)
+    {
+        MoralMemRegion *r = &s_moral_mem[i];
+        if (gva >= r->base && (u32)(gva - r->base) + nbytes <= r->size)
+            return r->host + (gva - r->base);
+    }
+    return NULL;
+}
+
 u32 *isrStackPtr;
 u32 isrStackList[100][17];
 
@@ -1356,25 +1389,49 @@ void initMtkSimalator()
 
     /* 勿映射满 16MB：须留出 0x00D00000 给 IDA XRAM，否则与触摸/MMI 全局量冲突 → err 11 */
     err = uc_mem_map_ptr(MTK, ROM_ADDRESS, GUEST_LOW_IMAGE_MAP_SIZE, UC_PROT_ALL, ROM_MEMPOOL);
+    moral_mem_region_add(ROM_ADDRESS, GUEST_LOW_IMAGE_MAP_SIZE, ROM_MEMPOOL);
     /* IDA：IRAM_SECTION0 / IRAM_SECTION / IRAM_RF_SECTION，约 0x08000000..0x08005BAC */
     err = uc_mem_map_ptr(MTK, GUEST_IRAM_SECTION0_BASE, (size_t)GUEST_IRAM_SECTION0_MAP_SIZE,
                          UC_PROT_ALL, ROM2_MEMPOOL);
     if (err != UC_ERR_OK)
         printf("[mem] map IRAM_SECTION0 @0x%X err %u (%s)\n", GUEST_IRAM_SECTION0_BASE, err, uc_strerror(err));
     else
+    {
+        moral_mem_region_add(GUEST_IRAM_SECTION0_BASE, (u32)GUEST_IRAM_SECTION0_MAP_SIZE, ROM2_MEMPOOL);
         printf("[mem] Mapped IDA IRAM_SECTION0..RF 0x%08X size=0x%X\n", GUEST_IRAM_SECTION0_BASE,
                (unsigned)GUEST_IRAM_SECTION0_MAP_SIZE);
-    err = uc_mem_map_ptr(MTK, 0x7000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
-    err = uc_mem_map_ptr(MTK, 0x1000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
+    }
+    {
+        void *p07 = SDL_malloc(size_16mb);
+        err = uc_mem_map_ptr(MTK, 0x7000000, size_16mb, UC_PROT_ALL, p07);
+        if (err == UC_ERR_OK) moral_mem_region_add(0x7000000u, size_16mb, p07);
+    }
+    {
+        void *p01 = SDL_malloc(size_16mb);
+        err = uc_mem_map_ptr(MTK, 0x1000000, size_16mb, UC_PROT_ALL, p01);
+        if (err == UC_ERR_OK) moral_mem_region_add(0x1000000u, size_16mb, p01);
+    }
 
     if (err)
     {
         printf("Failed mem  Rom map: %u (%s)\n", err, uc_strerror(err));
         return NULL;
     }
-    err = uc_mem_map_ptr(MTK, 0x0f000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
-    err = uc_mem_map_ptr(MTK, 0x0e000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
-    err = uc_mem_map_ptr(MTK, 0x0d000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
+    {
+        void *p0f = SDL_malloc(size_16mb);
+        err = uc_mem_map_ptr(MTK, 0x0f000000, size_16mb, UC_PROT_ALL, p0f);
+        if (err == UC_ERR_OK) moral_mem_region_add(0x0f000000u, size_16mb, p0f);
+    }
+    {
+        void *p0e = SDL_malloc(size_16mb);
+        err = uc_mem_map_ptr(MTK, 0x0e000000, size_16mb, UC_PROT_ALL, p0e);
+        if (err == UC_ERR_OK) moral_mem_region_add(0x0e000000u, size_16mb, p0e);
+    }
+    {
+        void *p0d = SDL_malloc(size_16mb);
+        err = uc_mem_map_ptr(MTK, 0x0d000000, size_16mb, UC_PROT_ALL, p0d);
+        if (err == UC_ERR_OK) moral_mem_region_add(0x0d000000u, size_16mb, p0d);
+    }
 
     s_ida_xram_host = NULL;
     {
@@ -1389,6 +1446,7 @@ void initMtkSimalator()
             else
             {
                 s_ida_xram_host = (u8 *)ida_xram;
+                moral_mem_region_add(GUEST_IDA_XRAM_BASE, (u32)GUEST_IDA_XRAM_SIZE, ida_xram);
                 printf("[mem] Mapped IDA XRAM 0x%X size=0x%X (touch ZI / MMI globals)\n",
                        GUEST_IDA_XRAM_BASE, (unsigned)GUEST_IDA_XRAM_SIZE);
             }
@@ -1396,11 +1454,26 @@ void initMtkSimalator()
     }
 
     /* MT6252 外部 SRAM/PSRAM 可能在 0x04000000 bank */
-    err = uc_mem_map_ptr(MTK, 0x04000000, size_16mb * 4, UC_PROT_ALL, SDL_calloc(1, size_16mb * 4));
-    err = uc_mem_map_ptr(MTK, 0x10000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
-    err = uc_mem_map_ptr(MTK, 0x60000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
-
-    err = uc_mem_map_ptr(MTK, 0x50000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
+    {
+        void *p04 = SDL_calloc(1, size_16mb * 4);
+        err = uc_mem_map_ptr(MTK, 0x04000000, size_16mb * 4, UC_PROT_ALL, p04);
+        if (err == UC_ERR_OK) moral_mem_region_add(0x04000000u, size_16mb * 4, p04);
+    }
+    {
+        void *p10 = SDL_malloc(size_16mb);
+        err = uc_mem_map_ptr(MTK, 0x10000000, size_16mb, UC_PROT_ALL, p10);
+        if (err == UC_ERR_OK) moral_mem_region_add(0x10000000u, size_16mb, p10);
+    }
+    {
+        void *p60 = SDL_malloc(size_16mb);
+        err = uc_mem_map_ptr(MTK, 0x60000000, size_16mb, UC_PROT_ALL, p60);
+        if (err == UC_ERR_OK) moral_mem_region_add(0x60000000u, size_16mb, p60);
+    }
+    {
+        void *p50 = SDL_malloc(size_16mb);
+        err = uc_mem_map_ptr(MTK, 0x50000000, size_16mb, UC_PROT_ALL, p50);
+        if (err == UC_ERR_OK) moral_mem_region_add(0x50000000u, size_16mb, p50);
+    }
 
     /* IDA：IRAM_SECTION2，约 0x1C000000..0x1C010C9C；不映射会 UC_ERR_MAP */
     {
@@ -1415,13 +1488,20 @@ void initMtkSimalator()
                 printf("[mem] map IRAM_SECTION2 @0x%X err %u (%s)\n", GUEST_IRAM_SECTION2_BASE, err,
                        uc_strerror(err));
             else
+            {
+                moral_mem_region_add(GUEST_IRAM_SECTION2_BASE, (u32)GUEST_IRAM_SECTION2_MAP_SIZE, iram2);
                 printf("[mem] Mapped IDA IRAM_SECTION2 0x%08X size=0x%X\n", GUEST_IRAM_SECTION2_BASE,
                        (unsigned)GUEST_IRAM_SECTION2_MAP_SIZE);
+            }
         }
     }
 
     /* KER/BACKTRACE 诊断路径会访问 0x2800xxxx，缺失映射会触发 UC_ERR_MAP */
-    err = uc_mem_map_ptr(MTK, 0x28000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
+    {
+        void *p28 = SDL_malloc(size_16mb);
+        err = uc_mem_map_ptr(MTK, 0x28000000, size_16mb, UC_PROT_ALL, p28);
+        if (err == UC_ERR_OK) moral_mem_region_add(0x28000000u, size_16mb, p28);
+    }
 
     err = uc_mem_map_ptr(MTK, 0x74000000, size_4mb, UC_PROT_ALL, SDL_malloc(size_4mb));
     err = uc_mem_map_ptr(MTK, 0x34000000, size_4mb, UC_PROT_ALL, SDL_malloc(size_4mb));
@@ -1730,8 +1810,13 @@ uint32_t nand_checksum(uint8_t *buf, uint32_t len)
 
 int main(int argc, char *args[])
 {
-
     SetConsoleOutputCP(CP_UTF8);
+
+#ifdef _WIN32
+    /* 将 Windows 系统定时器精度调至 1ms（默认 15ms），确保 SDL_Delay(1) 实际睡 ~1ms。
+     * 精度低时主循环每轮 ≥15ms → timer IRQ 投递延迟 → 模拟 OS 时钟跑慢 → 卡顿。 */
+    timeBeginPeriod(1);
+#endif
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) < 0)
     {
@@ -1867,6 +1952,9 @@ int main(int argc, char *args[])
 
         loop();
     }
+#ifdef _WIN32
+    timeEndPeriod(1);
+#endif
     return 0;
 }
 

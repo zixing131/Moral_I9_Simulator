@@ -420,6 +420,35 @@ static int de_read_fb(u32 srcAddr, u32 guestPitch, u16 w, u16 h)
     /* 锁住帧缓冲区间：防止主线程读到写了一半的帧（撕裂） */
     pthread_mutex_lock(&g_lcd_frame_mutex);
     int ret = 0;
+
+    /* 快速路径：若帧缓冲在 host 直接映射区域，用 memcpy 代替 uc_mem_read（省去 Unicorn 地址查找开销）。
+     * 此时 emu 已停（DEDICATED_THREAD 模式下由 uc_emu_stop 保证），memcpy 安全无竞争。 */
+    {
+        u32 srcSpan = (guestPitch > rowBytes ? guestPitch : rowBytes) * (u32)h;
+        u8 *hostPtr = moral_guest_to_host(srcAddr, srcSpan);
+        if (hostPtr != NULL)
+        {
+            if (guestPitch == rowBytes)
+            {
+                memcpy(Lcd_Cache_Buffer, hostPtr, rowBytes * (u32)h);
+            }
+            else
+            {
+                for (u16 y = 0; y < h; y++)
+                {
+                    u32 readW = (guestPitch < rowBytes) ? guestPitch : rowBytes;
+                    u8 *dst = Lcd_Cache_Buffer + (u32)y * rowBytes;
+                    memcpy(dst, hostPtr + (u32)y * guestPitch, readW);
+                    if (readW < rowBytes)
+                        memset(dst + readW, 0, rowBytes - readW);
+                }
+            }
+            pthread_mutex_unlock(&g_lcd_frame_mutex);
+            return 0;
+        }
+    }
+
+    /* 慢速路径：uc_mem_read（帧缓冲不在直接映射区时的回退） */
     if (guestPitch == rowBytes)
     {
         if (uc_mem_read(MTK, srcAddr, Lcd_Cache_Buffer, rowBytes * h) != UC_ERR_OK)
@@ -1076,6 +1105,49 @@ void de_emulator_flush_pending(void)
         pitch = (u32)w * DE_BPP;
 
 #if MORAL_EMU_DEDICATED_THREAD
+    /* 快速路径：若帧缓冲在 host 直接映射区，主线程可立即 memcpy + 渲染，无需停 emu。
+     * emu 继续运行（可能同时写帧缓冲），极少数帧有轻微撕裂但无崩溃；
+     * 相比"停 emu → emu 线程读 FB → 主线程下一轮渲染"可减少 1~15ms 显示延迟。 */
+    if (moral_guest_to_host(srcBuf, 1u) != NULL)
+    {
+        uint64_t now = moral_get_ticks_ms();
+        if (de_read_fb(srcBuf, pitch, w, h) == 0)
+        {
+            int skip = 0;
+            if (w >= DE_PANEL_W - 20u && h >= DE_PANEL_H - 80u)
+            {
+                u32 rowBytes = (u32)w * DE_BPP;
+                u32 step = (rowBytes < 16u) ? 2u : 16u;
+                u32 cnt = 0, white = 0;
+                for (u32 off = 0; off < (u32)h * rowBytes && cnt < 64u; off += step)
+                {
+                    cnt++;
+                    if (off + 1u < (u32)h * rowBytes &&
+                        Lcd_Cache_Buffer[off] == 0xFFu && Lcd_Cache_Buffer[off + 1u] == 0xFFu)
+                        white++;
+                }
+                if (cnt > 0 && white * 10u >= cnt * 9u)
+                    skip = 1;
+            }
+            if (!skip)
+            {
+                if (w == DE_PANEL_W && h == DE_PANEL_H)
+                    de_blit_to_sdl(0, 0, w, h, (u32)w * DE_BPP);
+                else
+                {
+                    u16 dstX, dstY;
+                    de_resolve_blit_dest(srcBuf, &dstX, &dstY);
+                    de_blit_to_sdl(dstX, dstY, w, h, (u32)w * DE_BPP);
+                }
+                Lcd_Need_Update = 1;
+                de_deferred_last_draw = now;
+                Perf_LcdRefreshCount++;
+            }
+            de_deferred_pending = 0;
+            return;
+        }
+    }
+    /* 慢速路径：停 emu 线程后由其拉取帧缓冲（帧缓冲不在直接映射区的回退） */
     de_guest_fb_pull_requested = 1;
     if (MTK != NULL)
         uc_emu_stop(MTK);

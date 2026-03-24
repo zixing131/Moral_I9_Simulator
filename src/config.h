@@ -85,9 +85,10 @@
 
 /*
  * SDL_UpdateWindowSurface 最小间隔（毫秒）。0=每帧可 present（更顺滑，略增 CPU）。
+ * 33=上限 30fps present，减少 SDL 开销；固件帧率通常 25fps，33ms 不会漏帧。
  */
 #ifndef MORAL_LCD_PRESENT_MIN_INTERVAL_MS
-#define MORAL_LCD_PRESENT_MIN_INTERVAL_MS 0
+#define MORAL_LCD_PRESENT_MIN_INTERVAL_MS 33
 #endif
 
 /* 主循环内连续 uc_emu_start 的时间预算（毫秒）；仅当 MORAL_EMU_DEDICATED_THREAD=0 时有效 */
