@@ -520,6 +520,9 @@ int writeFile(const char *filename, void *buff, u32 size)
     return result;
 }
 
+static int sd_boot_sector_is_sane(const u8 *sec, unsigned long long file_bytes);
+static int sd_image_candidate_is_usable(FILE *fp, const char *path);
+
 static FILE *open_sd_image_with_fallback(const char **opened_path)
 {
     static char resolved_path[512];
@@ -783,39 +786,40 @@ static int sd_image_candidate_is_usable(FILE *fp, const char *path)
     long save = ftell(fp);
 #endif
     unsigned long long file_bytes = 0;
+    unsigned long long nsec;
     u8 s0[512];
+    u32 lba;
+    u32 cnt;
 
     if (save < 0)
         return 1;
     if (sd_img_get_file_size(fp, &file_bytes) != 0 || file_bytes < 512ULL)
         return 1;
+    nsec = file_bytes / 512ULL;
     if (sd_img_fseek_set(fp, 0ULL) != 0)
         goto restore_and_accept;
     if (fread(s0, 1, sizeof(s0), fp) != sizeof(s0))
         goto restore_and_accept;
 
+    lba = sd_ld32_img(s0 + 0x1C6);
+    cnt = sd_ld32_img(s0 + 0x1CA);
+
+    if (cnt != 0u && (unsigned long long)lba < nsec &&
+        (unsigned long long)lba + (unsigned long long)cnt <= nsec)
+    {
+        u8 vbr[512];
+        if (sd_img_fseek_set(fp, (unsigned long long)lba * 512ULL) == 0 &&
+            fread(vbr, 1, sizeof(vbr), fp) == sizeof(vbr) &&
+            sd_boot_sector_is_sane(vbr, file_bytes))
+            goto restore_and_accept;
+
+        printf("[SD] 跳过候选镜像: %s\n", path);
+        printf("[SD]     原因: 分区表存在，但引导扇区/BPB 几何非法或超出镜像长度\n");
+        goto restore_and_reject;
+    }
+
     if (sd_boot_sector_is_sane(s0, file_bytes))
         goto restore_and_accept;
-
-    if (s0[0x1FE] == 0x55 && s0[0x1FF] == 0xAA)
-    {
-        unsigned long long nsec = file_bytes / 512ULL;
-        u32 lba = sd_ld32_img(s0 + 0x1C6);
-        u32 cnt = sd_ld32_img(s0 + 0x1CA);
-        if (cnt != 0u && (unsigned long long)lba < nsec &&
-            (unsigned long long)lba + (unsigned long long)cnt <= nsec)
-        {
-            u8 vbr[512];
-            if (sd_img_fseek_set(fp, (unsigned long long)lba * 512ULL) == 0 &&
-                fread(vbr, 1, sizeof(vbr), fp) == sizeof(vbr) &&
-                sd_boot_sector_is_sane(vbr, file_bytes))
-                goto restore_and_accept;
-
-            printf("[SD] 跳过候选镜像: %s\n", path);
-            printf("[SD]     原因: 分区表存在，但引导扇区/BPB 几何非法或超出镜像长度\n");
-            goto restore_and_reject;
-        }
-    }
 
 restore_and_accept:
 #if defined(_WIN32)
