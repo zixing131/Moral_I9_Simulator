@@ -1207,7 +1207,8 @@ void initMtkSimalator()
      * 故像 0xEE9DC 这类 16 位指令常登记两字节区间。
      */
     {
-        static uc_hook code_hooks[32];
+        /* 与 hook_ranges 行数一致并留余量；曾用 32 与表项持平导致无法再挂 sysIsCdcFastInitMode */
+        static uc_hook code_hooks[48];
         int hi = 0;
         static const u32 hook_ranges[][2] = {
             {0xA144, 0xA145},         /* pin config */
@@ -1248,6 +1249,39 @@ void initMtkSimalator()
             err = uc_hook_add(MTK, &code_hooks[hi++], UC_HOOK_CODE,
                               hookCodeCallBack, 0,
                               hook_ranges[ri][0], hook_ranges[ri][1]);
+        }
+        if (MORAL_HOOK_SYS_IS_CDC_PC != 0u)
+        {
+            u32 cdc_lo = MORAL_HOOK_SYS_IS_CDC_PC & ~1u;
+            u32 cdc_hi = cdc_lo + MORAL_HOOK_SYS_IS_CDC_BYTES - 1u;
+            if (hi >= (int)(sizeof(code_hooks) / sizeof(code_hooks[0])))
+                printf("[hook] code_hooks[] full, skip sysIsCdcFastInitMode @0x%X\n", cdc_lo);
+            else if (cdc_hi >= cdc_lo)
+            {
+                err = uc_hook_add(MTK, &code_hooks[hi++], UC_HOOK_CODE,
+                                  hookCodeCallBack, 0, cdc_lo, cdc_hi);
+                if (err != UC_ERR_OK)
+                    printf("[hook] sysIsCdcFastInitMode CODE hook @0x%X err %u\n", cdc_lo, err);
+                else
+                    printf("[hook] sysIsCdcFastInitMode 已挂接 0x%X..0x%X（命中时打印 [sysIsCdcFastInitMode]）\n",
+                           cdc_lo, cdc_hi);
+            }
+        }
+        if (MORAL_HOOK_VSPRINTF_PC != 0u)
+        {
+            u32 vlo = MORAL_HOOK_VSPRINTF_PC & ~1u;
+            u32 vhi = vlo + MORAL_HOOK_VSPRINTF_BYTES - 1u;
+            if (hi >= (int)(sizeof(code_hooks) / sizeof(code_hooks[0])))
+                printf("[hook] code_hooks[] full, skip vsprintf @0x%X\n", vlo);
+            else if (vhi >= vlo)
+            {
+                err = uc_hook_add(MTK, &code_hooks[hi++], UC_HOOK_CODE,
+                                  hookCodeCallBack, 0, vlo, vhi);
+                if (err != UC_ERR_OK)
+                    printf("[hook] vsprintf CODE hook @0x%X err %u\n", vlo, err);
+                else
+                    printf("[hook] vsprintf 已挂接 0x%X..0x%X（命中时打印 [vsprintf] 展开行）\n", vlo, vhi);
+            }
         }
     }
 
@@ -1762,12 +1796,507 @@ static void moral_emu_thumb_ldrh_r1_r1_plus34(void)
     uc_reg_write(MTK, UC_ARM_REG_PC, &npc);
 }
 
+typedef enum
+{
+    UA_INT,
+    UA_STR
+} moral_uart_spec_t;
+
+/* 扫描 printf 风格格式串中的转换说明（跳过 %%），最多 maxspec 个 */
+static int moral_uart_scan_specs(const char *fmt, moral_uart_spec_t *specs, int maxspec)
+{
+    int n = 0;
+    const char *p = fmt;
+
+    while (*p && n < maxspec)
+    {
+        if (*p != '%')
+        {
+            p++;
+            continue;
+        }
+        p++;
+        if (*p == '%')
+        {
+            p++;
+            continue;
+        }
+        while (*p == '-' || *p == '+' || *p == ' ' || *p == '#' || *p == '0')
+            p++;
+        while (*p >= '0' && *p <= '9')
+            p++;
+        if (*p == '*')
+            p++;
+        if (*p == '.')
+        {
+            p++;
+            while (*p >= '0' && *p <= '9')
+                p++;
+            if (*p == '*')
+                p++;
+        }
+        if (*p == 'l' && p[1] == 'l')
+            p += 2;
+        else if (*p == 'l' || *p == 'h' || *p == 'z' || *p == 'j' || *p == 't')
+            p++;
+
+        {
+            char c = *p++;
+            if (c == 'd' || c == 'i' || c == 'u' || c == 'x' || c == 'X' || c == 'o' || c == 'p' || c == 'c')
+                specs[n++] = UA_INT;
+            else if (c == 's')
+                specs[n++] = UA_STR;
+        }
+    }
+    return n;
+}
+
+/*
+ * sys_UartPrintf 钩子：R0=格式串 Guest 地址，R1/R2/R3 为前三个实参（与 ARM AAPCS 一致）。
+ * 按格式中的 %d/%u/%s 等顺序从寄存器取参并从 Guest 读字符串，snprintf 成一行再打印。
+ */
+static void moral_uart_hook_sprintf_line(u32 fmt_gva, u32 r1, u32 r2, u32 r3, char *out, size_t out_sz)
+{
+    char fmt[256];
+    char b0[256], b1[256];
+    moral_uart_spec_t sp[6];
+    int ns;
+    u32 rv[3];
+    int ri;
+    int i;
+    int ints[4];
+    int nint;
+    const char *strs[2];
+    int nstr;
+    char pat[8];
+    int pi;
+
+    if (out_sz == 0)
+        return;
+    out[0] = '\0';
+
+    if (fmt_gva < 0x1000u ||
+        uc_mem_read(MTK, fmt_gva, (u8 *)fmt, sizeof(fmt) - 1) != UC_ERR_OK)
+    {
+        snprintf(out, out_sz, "<uart bad fmt @0x%x>", fmt_gva);
+        return;
+    }
+    fmt[sizeof(fmt) - 1] = '\0';
+
+    ns = moral_uart_scan_specs(fmt, sp, 6);
+    rv[0] = r1;
+    rv[1] = r2;
+    rv[2] = r3;
+    nint = 0;
+    nstr = 0;
+    ri = 0;
+
+    for (i = 0; i < ns && ri < 3; i++)
+    {
+        u32 w = rv[ri++];
+        if (sp[i] == UA_INT)
+        {
+            if (nint < 4)
+                ints[nint++] = (int)(int32_t)w;
+        }
+        else
+        {
+            if (nstr >= 2)
+                continue;
+            if (w >= 0x1000u && uc_mem_read(MTK, w, (u8 *)(nstr == 0 ? b0 : b1), 255) == UC_ERR_OK)
+                (nstr == 0 ? b0 : b1)[255] = '\0';
+            else
+                (nstr == 0 ? b0 : b1)[0] = '\0';
+            strs[nstr] = (nstr == 0 ? b0 : b1);
+            nstr++;
+        }
+    }
+
+    if (i < ns)
+    {
+        snprintf(out, out_sz, "<uart need %d args, hook has 3 (fmt ok prefix: %s)>", ns, fmt);
+        return;
+    }
+
+    for (pi = 0; pi < ns && pi < (int)sizeof(pat) - 1; pi++)
+        pat[pi] = (sp[pi] == UA_INT) ? 'i' : 's';
+    pat[pi] = '\0';
+
+    if (ns == 0)
+        snprintf(out, out_sz, "%s", fmt);
+    else if (strcmp(pat, "i") == 0)
+        snprintf(out, out_sz, fmt, ints[0]);
+    else if (strcmp(pat, "ii") == 0)
+        snprintf(out, out_sz, fmt, ints[0], ints[1]);
+    else if (strcmp(pat, "iii") == 0)
+        snprintf(out, out_sz, fmt, ints[0], ints[1], ints[2]);
+    else if (strcmp(pat, "s") == 0)
+        snprintf(out, out_sz, fmt, strs[0]);
+    else if (strcmp(pat, "is") == 0)
+        snprintf(out, out_sz, fmt, ints[0], strs[0]);
+    else if (strcmp(pat, "si") == 0)
+        snprintf(out, out_sz, fmt, strs[0], ints[0]);
+    else if (strcmp(pat, "ss") == 0)
+        snprintf(out, out_sz, fmt, strs[0], strs[1]);
+    else if (strcmp(pat, "iis") == 0)
+        snprintf(out, out_sz, fmt, ints[0], ints[1], strs[0]);
+    else if (strcmp(pat, "isi") == 0)
+        snprintf(out, out_sz, fmt, ints[0], strs[0], ints[1]);
+    else if (strcmp(pat, "sii") == 0)
+        snprintf(out, out_sz, fmt, strs[0], ints[0], ints[1]);
+    else if (strcmp(pat, "sis") == 0)
+        snprintf(out, out_sz, fmt, strs[0], ints[0], strs[1]);
+    else if (strcmp(pat, "iss") == 0)
+        snprintf(out, out_sz, fmt, ints[0], strs[0], strs[1]);
+    else
+        snprintf(out, out_sz, "<uart unhandled pat [%s]>", pat);
+}
+
+static u32 moral_ap_align(u32 ap, u32 al)
+{
+    return (ap + al - 1u) & ~(al - 1u);
+}
+
+static int moral_ap_pull_u32(u32 *ap, u32 *dst)
+{
+    *ap = moral_ap_align(*ap, 4u);
+    if (uc_mem_read(MTK, *ap, dst, 4) != UC_ERR_OK)
+        return -1;
+    *ap += 4u;
+    return 0;
+}
+
+static void moral_guest_read_cstr_short(u32 gva, char *dst, size_t dst_sz)
+{
+    size_t i;
+    if (dst_sz == 0)
+        return;
+    if (gva < 0x1000u)
+    {
+        dst[0] = '\0';
+        return;
+    }
+    for (i = 0; i + 1 < dst_sz; i++)
+    {
+        u8 b = 0;
+        if (uc_mem_read(MTK, gva + (u32)i, &b, 1) != UC_ERR_OK)
+            break;
+        dst[i] = (char)b;
+        if (b == 0)
+            return;
+    }
+    dst[dst_sz - 1] = '\0';
+}
+
+/* 从 Guest 的 va_list 首址猜「下一实参」指针（GCC ARM EABI 常见：首字为 __ap） */
+static u32 moral_arm_va_list_guess_ap(u32 vl)
+{
+    u32 w0 = 0, w1 = 0;
+    if (vl < 0x1000u)
+        return 0;
+    if (uc_mem_read(MTK, vl, &w0, 4) != UC_ERR_OK)
+        return 0;
+    if (w0 >= 0x1000u && w0 < 0xF0000000u)
+        return w0;
+    if (uc_mem_read(MTK, vl + 4u, &w1, 4) == UC_ERR_OK && w1 >= 0x1000u && w1 < 0xF0000000u)
+        return w1;
+    return vl;
+}
+
+/* fp 指向 '%'，复制整条转换说明到 mini，返回指向说明符之后的指针 */
+static const char *moral_copy_one_printf_spec(const char *fp, char *mini, size_t maxk)
+{
+    size_t k = 0;
+
+    if (*fp != '%' || maxk < 4)
+        return fp;
+    mini[k++] = *fp++;
+    if (*fp == '%')
+    {
+        if (k < maxk - 1)
+            mini[k++] = *fp++;
+        mini[k] = '\0';
+        return fp;
+    }
+    while (k + 1 < maxk &&
+           (*fp == '-' || *fp == '+' || *fp == ' ' || *fp == '#' || *fp == '0'))
+        mini[k++] = *fp++;
+    while (k + 1 < maxk && *fp >= '0' && *fp <= '9')
+        mini[k++] = *fp++;
+    if (k + 1 < maxk && *fp == '*')
+        mini[k++] = *fp++;
+    if (k + 1 < maxk && *fp == '.')
+    {
+        mini[k++] = *fp++;
+        while (k + 1 < maxk && *fp >= '0' && *fp <= '9')
+            mini[k++] = *fp++;
+        if (k + 1 < maxk && *fp == '*')
+            mini[k++] = *fp++;
+    }
+    if (k + 2 < maxk && fp[0] == 'l' && fp[1] == 'l')
+    {
+        mini[k++] = *fp++;
+        mini[k++] = *fp++;
+    }
+    else
+    {
+        while (k + 1 < maxk &&
+               (*fp == 'l' || *fp == 'h' || *fp == 'z' || *fp == 'j' || *fp == 't'))
+            mini[k++] = *fp++;
+    }
+    if (k + 1 < maxk && *fp != '\0')
+        mini[k++] = *fp++;
+    mini[k] = '\0';
+    return fp;
+}
+
+/*
+ * 按格式串从 Guest 的 ap 依次取参并拼成一行（与 OEMOS_dbgprintf→vsprintf 用法一致）。
+ * 不支持 %*n 动态宽度、%n；遇 * 则输出占位说明。
+ */
+static void moral_vsprintf_guest_format_line(u32 fmt_gva, u32 va_list_gva, char *out, size_t out_sz)
+{
+    char fmt[640];
+    char mini[48];
+    char frag[384];
+    char gstr[288];
+    u32 ap;
+    const char *fp;
+    char *op;
+    size_t rem;
+    unsigned guard;
+
+    if (out_sz == 0)
+        return;
+    out[0] = '\0';
+    if (fmt_gva < 0x1000u)
+    {
+        snprintf(out, out_sz, "<vsprintf bad fmt @0x%x>", fmt_gva);
+        return;
+    }
+    {
+        size_t i;
+        for (i = 0; i < sizeof(fmt) - 1u; i++)
+        {
+            u8 b = 0;
+            if (uc_mem_read(MTK, fmt_gva + (u32)i, &b, 1) != UC_ERR_OK)
+                break;
+            fmt[i] = (char)b;
+            if (b == 0)
+                break;
+        }
+        fmt[i] = '\0';
+    }
+
+    ap = moral_arm_va_list_guess_ap(va_list_gva);
+    if (ap == 0)
+    {
+        snprintf(out, out_sz, "<vsprintf bad va_list @0x%x>", va_list_gva);
+        return;
+    }
+
+    fp = fmt;
+    op = out;
+    rem = out_sz;
+    guard = 0;
+    while (*fp != '\0' && rem > 1u && guard < 4096u)
+    {
+        guard++;
+        if (fp[0] == '%' && fp[1] == '%')
+        {
+            *op++ = '%';
+            fp += 2;
+            rem--;
+            continue;
+        }
+        if (*fp != '%')
+        {
+            *op++ = *fp++;
+            rem--;
+            continue;
+        }
+
+        fp = moral_copy_one_printf_spec(fp, mini, sizeof(mini));
+        if (mini[0] != '%')
+            break;
+
+        if (strchr(mini, '*') != NULL)
+        {
+            int n = snprintf(frag, sizeof(frag), "<*spec:%s>", mini);
+            if (n > 0 && (size_t)n < rem)
+            {
+                memcpy(op, frag, (size_t)n);
+                op += n;
+                rem -= (size_t)n;
+            }
+            continue;
+        }
+
+        {
+            char tc = mini[strlen(mini) - 1u];
+            int n = -1;
+
+            if (tc == 'n')
+            {
+                n = snprintf(frag, sizeof(frag), "<%%n>");
+            }
+            else if (strstr(mini, "lld") != NULL || strstr(mini, "lli") != NULL)
+            {
+                long long v = 0;
+                ap = moral_ap_align(ap, 8u);
+                if (uc_mem_read(MTK, ap, &v, 8) != UC_ERR_OK)
+                    n = snprintf(frag, sizeof(frag), "<lld read err>");
+                else
+                {
+                    ap += 8u;
+                    n = snprintf(frag, sizeof(frag), mini, v);
+                }
+            }
+            else if (strstr(mini, "llu") != NULL || strstr(mini, "llx") != NULL ||
+                     strstr(mini, "llo") != NULL)
+            {
+                unsigned long long v = 0;
+                ap = moral_ap_align(ap, 8u);
+                if (uc_mem_read(MTK, ap, &v, 8) != UC_ERR_OK)
+                    n = snprintf(frag, sizeof(frag), "<llu read err>");
+                else
+                {
+                    ap += 8u;
+                    n = snprintf(frag, sizeof(frag), mini, v);
+                }
+            }
+            else if (tc == 's')
+            {
+                u32 p = 0;
+                if (moral_ap_pull_u32(&ap, &p) != 0)
+                    n = snprintf(frag, sizeof(frag), "<s pull err>");
+                else
+                {
+                    moral_guest_read_cstr_short(p, gstr, sizeof(gstr));
+                    n = snprintf(frag, sizeof(frag), mini, gstr);
+                }
+            }
+            else if (tc == 'f' || tc == 'F' || tc == 'g' || tc == 'G' || tc == 'e' || tc == 'E' ||
+                     tc == 'a' || tc == 'A')
+            {
+                double dv = 0.0;
+                ap = moral_ap_align(ap, 8u);
+                if (uc_mem_read(MTK, ap, &dv, 8) != UC_ERR_OK)
+                    n = snprintf(frag, sizeof(frag), "<float read err>");
+                else
+                {
+                    ap += 8u;
+                    n = snprintf(frag, sizeof(frag), mini, dv);
+                }
+            }
+            else if (tc == 'd' || tc == 'i')
+            {
+                u32 v = 0;
+                if (moral_ap_pull_u32(&ap, &v) != 0)
+                    n = snprintf(frag, sizeof(frag), "<di pull err>");
+                else
+                    n = snprintf(frag, sizeof(frag), mini, (int)(int32_t)v);
+            }
+            else if (tc == 'u' || tc == 'x' || tc == 'X' || tc == 'o' || tc == 'p')
+            {
+                u32 v = 0;
+                if (moral_ap_pull_u32(&ap, &v) != 0)
+                    n = snprintf(frag, sizeof(frag), "<ux pull err>");
+                else
+                    n = snprintf(frag, sizeof(frag), mini, (unsigned)v);
+            }
+            else if (tc == 'c')
+            {
+                u32 v = 0;
+                if (moral_ap_pull_u32(&ap, &v) != 0)
+                    n = snprintf(frag, sizeof(frag), "<c pull err>");
+                else
+                    n = snprintf(frag, sizeof(frag), mini, (unsigned char)v);
+            }
+            else
+            {
+                n = snprintf(frag, sizeof(frag), "<fmt:%s>", mini);
+            }
+
+            if (n < 0 || (size_t)n >= rem)
+                break;
+            memcpy(op, frag, (size_t)n);
+            op += (size_t)n;
+            rem -= (size_t)n;
+        }
+    }
+    *op = '\0';
+}
+
 void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
     u32 tmp1, tmp2, tmp3, tmp4;
     (void)uc;
     (void)size;
     (void)user_data;
+
+    if (MORAL_HOOK_SYS_IS_CDC_PC != 0u)
+    {
+        u32 apc = (u32)address & ~1u;
+        u32 cdc_lo = MORAL_HOOK_SYS_IS_CDC_PC & ~1u;
+        if (apc == cdc_lo)
+        {
+            static u32 moral_cdc_fast_init_log;
+            u32 lr = 0;
+            uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+            if (MORAL_B_IS_CDC_FAST_INIT_GVA != 0u)
+            {
+                u8 b = 0;
+                if (uc_mem_read(MTK, MORAL_B_IS_CDC_FAST_INIT_GVA, &b, 1) == UC_ERR_OK)
+                {
+                    if (moral_cdc_fast_init_log < 128u)
+                    {
+                        moral_cdc_fast_init_log++;
+                        printf("[sysIsCdcFastInitMode] #%u pc=0x%x lr=0x%x -> return %u (bIsCdcFastInitMode@0x%x)\n",
+                               moral_cdc_fast_init_log, apc, lr, (unsigned)b,
+                               (unsigned)MORAL_B_IS_CDC_FAST_INIT_GVA);
+                    }
+                }
+                else if (moral_cdc_fast_init_log < 8u)
+                {
+                    moral_cdc_fast_init_log++;
+                    printf("[sysIsCdcFastInitMode] pc=0x%x lr=0x%x uc_mem_read bIsCdcFastInitMode@0x%x failed\n",
+                           apc, lr, (unsigned)MORAL_B_IS_CDC_FAST_INIT_GVA);
+                }
+            }
+            else if (moral_cdc_fast_init_log < 8u)
+            {
+                moral_cdc_fast_init_log++;
+                printf("[sysIsCdcFastInitMode] pc=0x%x lr=0x%x — set MORAL_B_IS_CDC_FAST_INIT_GVA in config.h to read byte\n",
+                       apc, lr);
+            }
+        }
+    }
+
+    if (MORAL_HOOK_VSPRINTF_PC != 0u)
+    {
+        u32 apc = (u32)address & ~1u;
+        u32 vlo = MORAL_HOOK_VSPRINTF_PC & ~1u;
+        if (apc == vlo)
+        {
+            static u32 moral_vsprintf_hook_count;
+            u32 r0 = 0, r1 = 0, r2 = 0;
+            char line[768];
+            int allow = (MORAL_VSPRINTF_HOOK_LOG_MAX == 0u ||
+                         moral_vsprintf_hook_count < MORAL_VSPRINTF_HOOK_LOG_MAX);
+
+            if (allow)
+            {
+                moral_vsprintf_hook_count++;
+                uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+                uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+                uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+                moral_vsprintf_guest_format_line(r1, r2, line, sizeof(line));
+                printf("[vsprintf] dest=0x%x fmt@0x%x va@0x%x -> %s\n",
+                       r0, r1, r2, line);
+            }
+        }
+    }
 
     if (((u32)address & ~1u) == 0x31b9c)
     {
@@ -2072,20 +2601,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     case 0x2d5eca:
     {
         static u32 uart_cnt = 0;
+        char uart_line[320];
         uart_cnt++;
-        if (uart_cnt <= 20)
+        if (MORAL_UART_HOOK_PRINT_MAX == 0u || uart_cnt <= MORAL_UART_HOOK_PRINT_MAX)
         {
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
             uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
             uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            uc_mem_read(MTK, tmp1, globalSprintfBuff, 128);
-            if (strstr(globalSprintfBuff, "%30s") == NULL && strstr(globalSprintfBuff, "%s") == NULL)
-                printf("[uart_print]%s,%x,%x(%x)\n", globalSprintfBuff, tmp2, tmp3, lastAddress);
-            else
-            {
-                uc_mem_read(MTK, tmp2, sprintfBuff, 128);
-                printf("[uart_print]%s,%x,%x\n", globalSprintfBuff, sprintfBuff);
-            }
+            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+            moral_uart_hook_sprintf_line(tmp1, tmp2, tmp3, tmp4, uart_line, sizeof(uart_line));
+            printf("[uart_print] %s\n", uart_line);
         }
         break;
     }

@@ -64,6 +64,14 @@
 #define MORAL_LOG_HOT_PATH 0
 #endif
 
+/*
+ * 0x2D5ECA uart_print 钩子最多打印次数（static 计数）；早期 NAND/KER 会占满，后面的 DrvLcdConfig 等 printf 会被吃掉。
+ * 设为 0 表示不限制（可能极刷屏）。
+ */
+#ifndef MORAL_UART_HOOK_PRINT_MAX
+#define MORAL_UART_HOOK_PRINT_MAX 512u
+#endif
+
 /* KER_VTRACE / ker_trace 代码钩子：默认关闭，避免固件刷屏时同步控制台 I/O 拖垮模拟 */
 #ifndef MORAL_LOG_KERNEL_TRACE
 #define MORAL_LOG_KERNEL_TRACE 0
@@ -72,6 +80,37 @@
 /* 指令级补丁调试：如 0xEE9DC 软执行 LDRH、INSN_INVALID 等；默认关，避免控制台刷屏 */
 #ifndef MORAL_LOG_UC_CODE_PATCH
 #define MORAL_LOG_UC_CODE_PATCH 0
+#endif
+
+/*
+ * 观测 sysIsCdcFastInitMode() 的返回值（实为 (u8)bIsCdcFastInitMode）：
+ * 在 IDA 中打开函数，首条指令地址填入 MORAL_HOOK_SYS_IS_CDC_PC（Thumb 可用奇/偶 PC，内部会规范到偶地址）。
+ * 在 IDA 中对 bIsCdcFastInitMode 按「G」或变量声明看地址，填入 MORAL_B_IS_CDC_FAST_INIT_GVA（与固件加载基址一致，通常 0 基）。
+ * MORAL_HOOK_SYS_IS_CDC_PC 为 0 时不注册钩子。
+ */
+#ifndef MORAL_HOOK_SYS_IS_CDC_PC
+#define MORAL_HOOK_SYS_IS_CDC_PC 0x127538u /* IDA：sysIsCdcFastInitMode 首址 */
+#endif
+#ifndef MORAL_B_IS_CDC_FAST_INIT_GVA
+#define MORAL_B_IS_CDC_FAST_INIT_GVA 0x00D01DB0u /* IDA XRAM: bIsCdcFastInitMode DCB 0 */
+#endif
+/* Thumb 首条 16 位指令填 2；若为 ARM 首条 32 位则填 4 */
+#ifndef MORAL_HOOK_SYS_IS_CDC_BYTES
+#define MORAL_HOOK_SYS_IS_CDC_BYTES 2u
+#endif
+
+/*
+ * vsprintf（IDA 首址）：R0=目标缓冲，R1=格式串，R2=va_list（GCC ARM 下多为指向 __ap 的结构）。
+ * 为 0 时不挂接。MORAL_VSPRINTF_HOOK_LOG_MAX：最多打印次数，0=不限制。
+ */
+#ifndef MORAL_HOOK_VSPRINTF_PC
+#define MORAL_HOOK_VSPRINTF_PC 0x303640u
+#endif
+#ifndef MORAL_HOOK_VSPRINTF_BYTES
+#define MORAL_HOOK_VSPRINTF_BYTES 2u
+#endif
+#ifndef MORAL_VSPRINTF_HOOK_LOG_MAX
+#define MORAL_VSPRINTF_HOOK_LOG_MAX 512u
 #endif
 
 #ifndef MORAL_LOG_SD_IO
