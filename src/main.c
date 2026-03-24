@@ -1809,6 +1809,7 @@ int main(int argc, char *args[])
         }
 
 #if MORAL_EMU_DEDICATED_THREAD
+        pthread_mutex_init(&g_lcd_frame_mutex, NULL);
         moral_emu_thread_stop = 0;
         pthread_create(&emu_thread, NULL, moral_pthread_run_arm, (void *)(uintptr_t)ROM_ADDRESS);
 #endif

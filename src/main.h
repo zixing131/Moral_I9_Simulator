@@ -193,46 +193,63 @@ typedef struct VM_DMA_CONFIG_
 
 u32 Lcd_Buffer_Ptr;
 u32 Lcd_FullScreen_Ptr;
+/* DrvLcdSetDisplayRange / SWI 0xc166：R0,R1,R2,R3 = 脏矩形 x,y,w,h */
 u32 Lcd_Update_X;
 u32 Lcd_Update_Y;
 u32 Lcd_Update_W;
 u32 Lcd_Update_H;
-u32 Lcd_Update_Pitch;
 u8 Lcd_Cache_Buffer[240 * 400 * 4];
 u8 Lcd_Periodic_Buffer[240 * 400 * 4];
 u8 Lcd_Need_Update = 0;
-/** 由 0x7400313C 首次成功刷屏后置 1；此前禁止周期性显存拉取，避免开机动画/未就绪缓冲花屏 */
+/* emu 线程写 Lcd_Cache_Buffer，主线程读 Lcd_Cache_Buffer → 用此锁保护，消除撕裂 */
+pthread_mutex_t g_lcd_frame_mutex;
+/** 由 0x7400313C 首次成功刷屏后置 1；此前禁止周期性显存拉取 */
 u8 De_PeriodicRefreshAllowed;
-/** DE trigger 触发时记录时间，周期性刷新在近期有 DE 活动时跳过，避免覆盖新渲染的内容 */
+/** DE trigger 触发时记录时间，周期性刷新在近期有 DE 活动时跳过 */
 uint64_t De_LastTriggerTime;
 
-u32 DE_Layer0_Ptr;
-u32 DE_Layer0_W;
-u32 DE_Layer0_H;
-u32 DE_Layer0_Pitch;
+/*
+ * IDA HalDispSetBufInfo 图层寄存器映射（完全对应 IDA 命名）：
+ *   Layer 0 (a1=0, OP 主层)  : 0x74003040/44=buf_ptr, 48=W, 4C=H, 50=pitch
+ *   Layer 1 (a1=1, PIP子层1) : 0x74003054/58=buf_ptr, 5C=W, 60=H, 64=pitch
+ *   Layer 2 (a1=2, PIP子层2) : 0x74003068/6C=buf_ptr, 70=W, 74=H, 78=pitch
+ *   Layer 3 (a1=3, PIP子层3) : 0x74003080/84=buf_ptr, 88=W, 8C=H, 90=pitch
+ */
+u32 DE_Layer0_Ptr;   /* 0x74003040 OP主层缓冲地址 */
+u32 DE_Layer0_W;     /* 0x74003048 */
+u32 DE_Layer0_H;     /* 0x7400304C */
+u32 DE_Layer0_Pitch; /* 0x74003050 */
 
-/* HalDispSetBufInfo case2/3 → 0x74003068、0x74003080（与 DE_Layer0 的 54 区并列的子图层） */
-u32 DE_Layer2_Ptr;
-u32 DE_Layer2_W;
-u32 DE_Layer2_H;
-u32 DE_Layer2_Pitch;
-u32 DE_Layer3_Ptr;
-u32 DE_Layer3_W;
-u32 DE_Layer3_H;
-u32 DE_Layer3_Pitch;
+u32 DE_Layer1_Ptr;   /* 0x74003054 PIP子层1 */
+u32 DE_Layer1_W;     /* 0x7400305C */
+u32 DE_Layer1_H;     /* 0x74003060 */
+u32 DE_Layer1_Pitch; /* 0x74003064 */
 
+u32 DE_Layer2_Ptr;   /* 0x74003068 PIP子层2 */
+u32 DE_Layer2_W;     /* 0x74003070 */
+u32 DE_Layer2_H;     /* 0x74003074 */
+u32 DE_Layer2_Pitch; /* 0x74003078 */
+
+u32 DE_Layer3_Ptr;   /* 0x74003080 PIP子层3 */
+u32 DE_Layer3_W;     /* 0x74003088 */
+u32 DE_Layer3_H;     /* 0x7400308C */
+u32 DE_Layer3_Pitch; /* 0x74003090 */
+
+/* HalDispSetBufInfo 汇总每层 width 对齐 nibble → 0x7400303C（IDA WidthMaskValue） */
+u32 DE_DispLayerWidthMask;
 /* HalDispSetLayerSel 写入 0x7400309C */
 u32 DE_LayerSel;
-/* HalDispSetPIP(1)→A0..AC，(2)→B0..BC：屏上目的矩形，与 68/80 字层成对（IDA HalDispSetPIP） */
+/* HalDispSetPIP(1)→0x740030A0..AC, (2)→0x740030B0..BC, (3)→0x740030C0..CC */
 u16 DE_PipLayer1[4];
 u16 DE_PipLayer2[4];
+u16 DE_PipLayer3[4];
 
-/* HalDispSetColorKey：每层 3×u16 写 DC/E0/E4、E8/EC/F0、F4/F8/FC；汇总控制字 0x74003100 */
+/* HalDispSetColorKey：每层 3×u16；层1=DC/E0/E4，层2=E8/EC/F0，层3=F4/F8/FC；控制字=0x74003100 */
 u16 DE_CKey1[3];
 u16 DE_CKey2[3];
 u16 DE_CKey3[3];
 u32 DE_ColorKeyCtrl;
-/* HalDispSetAlpha：a1=1..3 → 0x740030D0 + 4*(a1-1)，固件写 int16（IDA） */
+/* HalDispSetAlpha：a1=1..3 → 0x740030D0 + 4*(a1-1) */
 short DE_AlphaHw[3];
 
 void my_memcpy(void *dest, void *src, int len)

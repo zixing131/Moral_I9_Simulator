@@ -8,9 +8,16 @@
  * 含 SPI、定时器、显示引擎 DE、FCIE(NAND/SD)、UART、中断控制器、触摸 AUXADC、GPT、MSDC 等。
  * 与 main.c 的 UC_HOOK_CODE 分工：代码钩子改执行流/寄存器，本文件只伪造寄存器值与 DMA 数据搬运。
  *
- * 显示多图层（IDA 8533n_7835.axf）：HalDispSetBufInfo（54/68/80）、HalDispSetPIP（A0/B0）、
- * HalDispSetAlpha（0x740030D0+D4+D8）、HalDispSetColorKey（DC..FC + 0x74003100）。
- * 全屏合成见 MORAL_DE_LAYER_COMPOSITE / MORAL_DE_BLEND_COLORKEY / MORAL_DE_BLEND_ALPHA。
+ * DE 图层（完全对齐 IDA HalDispSetBufInfo）：
+ *   Layer 0 (a1=0, OP主层) : 0x74003040(ptr_lo)/44(ptr_hi)/48(W)/4C(H)/50(pitch)
+ *   Layer 1 (a1=1, PIP1)   : 0x74003054(ptr_lo)/58(ptr_hi)/5C(W)/60(H)/64(pitch)
+ *   Layer 2 (a1=2, PIP2)   : 0x74003068(ptr_lo)/6C(ptr_hi)/70(W)/74(H)/78(pitch)
+ *   Layer 3 (a1=3, PIP3)   : 0x74003080(ptr_lo)/84(ptr_hi)/88(W)/8C(H)/90(pitch)
+ * PIP 位置：Layer1→0x740030A0..AC, Layer2→B0..BC, Layer3→C0..CC
+ * Alpha   : 0x740030D0(L1)/D4(L2)/D8(L3)
+ * ColorKey: 0x740030DC/E0/E4(L1), E8/EC/F0(L2), F4/F8/FC(L3); 控制字=0x74003100
+ * 触发     : 0x7400313C(DE trigger), 0x74003140(FMark/Reset)
+ * 脏矩形 w/h 仅来自 SWI 0xc166，不与图层寄存器混用。
  */
 
 bool hookInsnInvalid(uc_engine *uc, void *user_data);
@@ -281,7 +288,10 @@ static void de_blit_to_sdl(u16 dstX, u16 dstY, u16 w, u16 h, u32 cachePitch)
 #endif
     }
 
+    /* 主线程读 Lcd_Cache_Buffer 时加锁，与 emu 线程写帧互斥，消除撕裂 */
+    pthread_mutex_lock(&g_lcd_frame_mutex);
     de_blit_rgb565_to_surface(sfc, Lcd_Cache_Buffer, dstX, dstY, w, h, cachePitch);
+    pthread_mutex_unlock(&g_lcd_frame_mutex);
 }
 
 /* HalDispSetBufInfo：单层 Guest 缓冲在 MIU 中的跨度（字节），用于判断 src 落在哪一层 */
@@ -296,75 +306,94 @@ static u32 de_layer_span_bytes(u32 pitch, u32 w, u32 h)
     return (h - 1u) * pitch + w * DE_BPP;
 }
 
+/* 返回某图层的 pitch；传入该层已知 pitch/W，无效则回退 DE_PANEL_W×BPP */
+static u32 de_pitch_or_default(u32 pitch, u32 w)
+{
+    u32 rowMin = (w > 0u && w <= (u32)DE_PANEL_W) ? (u32)w * DE_BPP : (u32)DE_PANEL_W * DE_BPP;
+    if (pitch >= rowMin && pitch < 8192u)
+        return pitch;
+    return rowMin;
+}
+
+/* 返回每个 Layer 对应的读行距（优先用已知 pitch） */
 static u32 de_row_pitch_for_layer_base(u32 base)
 {
     u32 row = (u32)DE_PANEL_W * DE_BPP;
 
-    if (base == DE_Layer0_Ptr && DE_Layer0_Pitch >= row && DE_Layer0_Pitch < 8192u)
-        return DE_Layer0_Pitch;
+    if (base == DE_Layer0_Ptr && DE_Layer0_W > 0u)
+        return de_pitch_or_default(DE_Layer0_Pitch, DE_Layer0_W);
+    if (base == DE_Layer1_Ptr && DE_Layer1_W > 0u)
+        return de_pitch_or_default(DE_Layer1_Pitch, DE_Layer1_W);
     if (base == DE_Layer2_Ptr && DE_Layer2_W > 0u)
-    {
-        u32 r2 = (u32)DE_Layer2_W * DE_BPP;
-        if (DE_Layer2_Pitch >= r2 && DE_Layer2_Pitch < 8192u)
-            return DE_Layer2_Pitch;
-    }
+        return de_pitch_or_default(DE_Layer2_Pitch, DE_Layer2_W);
     if (base == DE_Layer3_Ptr && DE_Layer3_W > 0u)
-    {
-        u32 r3 = (u32)DE_Layer3_W * DE_BPP;
-        if (DE_Layer3_Pitch >= r3 && DE_Layer3_Pitch < 8192u)
-            return DE_Layer3_Pitch;
-    }
-    if (base == Lcd_FullScreen_Ptr && DE_Layer0_Pitch >= row && DE_Layer0_Pitch < 8192u)
-        return DE_Layer0_Pitch;
+        return de_pitch_or_default(DE_Layer3_Pitch, DE_Layer3_W);
     return row;
 }
 
-/* 返回包含 srcBuf 的主帧缓冲基址；对齐 IDA HalDispSetBufInfo 多图层 54/68/80 */
+/* 全屏读时的 pitch：DE_Layer0_Pitch 始终是整屏行距（固件设 2*GetScreenWidth()=480） */
+static u32 de_guest_pitch_for_full_panel_read(u32 expandBase)
+{
+    (void)expandBase;
+    u32 p = DE_Layer0_Pitch;
+    u32 rowMin = (u32)DE_PANEL_W * DE_BPP;
+    if (p >= rowMin && p < 8192u)
+        return p;
+    return rowMin;
+}
+
+/* 周期拉帧 / 简易满屏读：必须用 Guest 真实行距，勿硬编码 240×2 */
+static u32 de_panel_read_pitch_from_base(u32 srcBase)
+{
+    u32 rowMin = (u32)DE_PANEL_W * DE_BPP;
+    u32 p = de_guest_pitch_for_full_panel_read(srcBase);
+    if (p < rowMin || p >= 8192u)
+        p = rowMin;
+    return p;
+}
+
+/*
+ * 检查 srcBuf 是否落在帧缓冲区间内，返回帧缓冲基址。
+ *
+ * 注意：DE_Layer0_Ptr 是脏区偏移后的地址（bufPtr + y*pitch + x*BPP），不是帧缓冲基址。
+ * 帧缓冲基址用 Lcd_FullScreen_Ptr（在整屏 trigger 时记录）。
+ * PIP 子层 (Layer1/2/3) 有独立的帧缓冲，可直接用。
+ */
 static u32 de_guest_fb_base_containing(u32 srcBuf)
 {
     u32 fbBytes = (u32)DE_PANEL_W * (u32)DE_PANEL_H * DE_BPP;
-    u32 span;
 
-    if (DE_Layer0_Ptr >= 0x1000u && DE_Layer0_Ptr < 0x8000000u &&
-        srcBuf >= DE_Layer0_Ptr && srcBuf < DE_Layer0_Ptr + fbBytes)
-        return DE_Layer0_Ptr;
-
-    span = de_layer_span_bytes(DE_Layer2_Pitch, DE_Layer2_W, DE_Layer2_H);
-    if (span != 0u && DE_Layer2_Ptr >= 0x1000u && DE_Layer2_Ptr < 0x8000000u &&
-        srcBuf >= DE_Layer2_Ptr && srcBuf < DE_Layer2_Ptr + span)
-        return DE_Layer2_Ptr;
-
-    span = de_layer_span_bytes(DE_Layer3_Pitch, DE_Layer3_W, DE_Layer3_H);
-    if (span != 0u && DE_Layer3_Ptr >= 0x1000u && DE_Layer3_Ptr < 0x8000000u &&
-        srcBuf >= DE_Layer3_Ptr && srcBuf < DE_Layer3_Ptr + span)
-        return DE_Layer3_Ptr;
-
+    /* 优先检查帧缓冲基址 */
     if (Lcd_FullScreen_Ptr >= 0x1000u && Lcd_FullScreen_Ptr < 0x8000000u &&
         srcBuf >= Lcd_FullScreen_Ptr && srcBuf < Lcd_FullScreen_Ptr + fbBytes)
         return Lcd_FullScreen_Ptr;
+
     return 0u;
 }
 
+/*
+ * srcBuf 是帧缓冲基址 + 脏区偏移（y*pitch + x*BPP）。
+ * 用 Lcd_FullScreen_Ptr（帧缓冲基址）和 pitch=480 反推脏区的 (x, y)。
+ */
 static void de_resolve_blit_dest(u32 srcBuf, u16 *dstX, u16 *dstY)
 {
-    u16 x = (u16)Lcd_Update_X;
-    u16 y = (u16)Lcd_Update_Y;
+    u32 pitch = (DE_Layer0_Pitch >= (u32)DE_PANEL_W * DE_BPP && DE_Layer0_Pitch < 8192u)
+                ? DE_Layer0_Pitch : (u32)DE_PANEL_W * DE_BPP;
 
-    u32 base = de_guest_fb_base_containing(srcBuf);
-    if (base != 0u)
+    if (Lcd_FullScreen_Ptr >= 0x1000u && srcBuf >= Lcd_FullScreen_Ptr)
     {
-        u32 off = srcBuf - base;
-        u32 mainPitch = de_row_pitch_for_layer_base(base);
-        u32 ty = off / mainPitch;
-        u32 tx = (off % mainPitch) / DE_BPP;
+        u32 off = srcBuf - Lcd_FullScreen_Ptr;
+        u32 ty = off / pitch;
+        u32 tx = (off % pitch) / DE_BPP;
         if (ty < DE_PANEL_H && tx < DE_PANEL_W)
         {
-            x = (u16)tx;
-            y = (u16)ty;
+            *dstX = (u16)tx;
+            *dstY = (u16)ty;
+            return;
         }
     }
-    *dstX = x;
-    *dstY = y;
+    *dstX = 0;
+    *dstY = 0;
 }
 
 static int de_read_fb(u32 srcAddr, u32 guestPitch, u16 w, u16 h)
@@ -375,10 +404,13 @@ static int de_read_fb(u32 srcAddr, u32 guestPitch, u16 w, u16 h)
     if ((u32)h * rowBytes > sizeof(Lcd_Cache_Buffer))
         return -1;
 
+    /* 锁住帧缓冲区间：防止主线程读到写了一半的帧（撕裂） */
+    pthread_mutex_lock(&g_lcd_frame_mutex);
+    int ret = 0;
     if (guestPitch == rowBytes)
     {
         if (uc_mem_read(MTK, srcAddr, Lcd_Cache_Buffer, rowBytes * h) != UC_ERR_OK)
-            return -1;
+            ret = -1;
     }
     else
     {
@@ -387,10 +419,52 @@ static int de_read_fb(u32 srcAddr, u32 guestPitch, u16 w, u16 h)
             u32 readW = (guestPitch < rowBytes) ? guestPitch : rowBytes;
             u8 *dst = Lcd_Cache_Buffer + (u32)y * rowBytes;
             if (uc_mem_read(MTK, srcAddr + (u32)y * guestPitch, dst, readW) != UC_ERR_OK)
-                return -1;
+            {
+                ret = -1;
+                break;
+            }
             if (readW < rowBytes)
                 memset(dst + readW, 0, rowBytes - readW);
         }
+    }
+    pthread_mutex_unlock(&g_lcd_frame_mutex);
+    return ret;
+}
+
+/*
+ * 按面板行距 dstPitch 写入 RGB565：每行仅拷 srcW 个像素，右侧填 0；超出 srcH 的行保持 0。
+ * 与 SDL/de_merge 使用的 240×2 行距一致，避免主层 W<H 与 pitch 和整屏 de_read_fb 混用造成条带花屏。
+ */
+static int de_read_guest_layer_to_panel(u8 *dst, u32 dstPitch, u16 panelW, u16 panelH, u32 srcAddr,
+                                        u32 srcPitch, u16 srcW, u16 srcH)
+{
+    u32 rowDst = (u32)panelW * DE_BPP;
+    u32 copyW;
+    u32 rowCopyBytes;
+    u16 y;
+
+    if (srcAddr < 0x1000u || srcAddr >= 0x8000000u || dstPitch < rowDst)
+        return -1;
+
+    copyW = (u32)srcW;
+    if (copyW > (u32)panelW)
+        copyW = (u32)panelW;
+    rowCopyBytes = copyW * DE_BPP;
+    if (srcPitch < rowCopyBytes || srcPitch >= 8192u)
+        srcPitch = rowCopyBytes;
+    if (srcH > panelH)
+        srcH = panelH;
+
+    memset(dst, 0, (size_t)panelH * dstPitch);
+
+    for (y = 0; y < srcH; y++)
+    {
+        u8 *rowd = dst + (u32)y * dstPitch;
+
+        if (uc_mem_read(MTK, srcAddr + (u32)y * srcPitch, rowd, rowCopyBytes) != UC_ERR_OK)
+            return -1;
+        if (rowCopyBytes < rowDst)
+            memset(rowd + rowCopyBytes, 0, rowDst - rowCopyBytes);
     }
     return 0;
 }
@@ -602,11 +676,23 @@ static int de_layer_geo_ok(u32 w, u32 h)
     return w >= 1u && w <= 1024u && h >= 1u && h <= 1024u;
 }
 
+/* 判断某层是否是 PIP 子层（W×H 明显小于主层，非全屏） */
+static int de_is_pip_sized(u32 w, u32 h)
+{
+    /* 全屏或接近全屏（>= 主层 80% 面积）视为主层备份，不叠加 */
+    if (w >= (u32)(DE_PANEL_W - 20u) && h >= (u32)(DE_PANEL_H - 80u))
+        return 0;
+    return de_layer_geo_ok(w, h);
+}
+
 static int de_multilayer_composite_needed(void)
 {
-    if (DE_Layer2_Ptr >= 0x1000u && de_layer_geo_ok(DE_Layer2_W, DE_Layer2_H))
+    /* PIP 子层：地址有效、不与主层同址、且尺寸明显小于全屏（非备用主层） */
+    if (DE_Layer1_Ptr >= 0x1000u && DE_Layer1_Ptr != DE_Layer0_Ptr && de_is_pip_sized(DE_Layer1_W, DE_Layer1_H))
         return 1;
-    if (DE_Layer3_Ptr >= 0x1000u && de_layer_geo_ok(DE_Layer3_W, DE_Layer3_H))
+    if (DE_Layer2_Ptr >= 0x1000u && DE_Layer2_Ptr != DE_Layer0_Ptr && de_is_pip_sized(DE_Layer2_W, DE_Layer2_H))
+        return 1;
+    if (DE_Layer3_Ptr >= 0x1000u && DE_Layer3_Ptr != DE_Layer0_Ptr && de_is_pip_sized(DE_Layer3_W, DE_Layer3_H))
         return 1;
     return 0;
 }
@@ -614,32 +700,58 @@ static int de_multilayer_composite_needed(void)
 static int de_read_fb_composite_into(u8 *dst, u32 dstCap)
 {
     u32 row = (u32)DE_PANEL_W * DE_BPP;
-    u32 p0 = DE_Layer0_Pitch;
+    u32 mainBase, mainPitch;
+    u16 gw, gh;
 
-    if (p0 < row || p0 >= 8192u)
-        p0 = row;
-    if (DE_Layer0_Ptr < 0x1000u || DE_Layer0_Ptr >= 0x8000000u)
+    /* 主层优先 DE_Layer0（OP），若无效则用 Lcd_FullScreen_Ptr 做单层读 */
+    if (DE_Layer0_Ptr >= 0x1000u && DE_Layer0_Ptr < 0x8000000u)
+        mainBase = DE_Layer0_Ptr;
+    else if (Lcd_FullScreen_Ptr >= 0x1000u && Lcd_FullScreen_Ptr < 0x8000000u)
+        mainBase = Lcd_FullScreen_Ptr;
+    else
         return -1;
+
     if ((u32)DE_PANEL_H * row > dstCap)
         return -1;
 
-    if (de_read_fb(DE_Layer0_Ptr, p0, (u16)DE_PANEL_W, (u16)DE_PANEL_H) != 0)
-        return -1;
-    if (dst != Lcd_Cache_Buffer)
-        memcpy(dst, Lcd_Cache_Buffer, (size_t)DE_PANEL_H * row);
+    gw = (DE_Layer0_W > 0u && DE_Layer0_W <= (u32)DE_PANEL_W) ? (u16)DE_Layer0_W : (u16)DE_PANEL_W;
+    gh = (DE_Layer0_H > 0u && DE_Layer0_H <= (u32)DE_PANEL_H) ? (u16)DE_Layer0_H : (u16)DE_PANEL_H;
+    mainPitch = de_pitch_or_default(DE_Layer0_Pitch, gw);
 
-    if (DE_Layer2_Ptr >= 0x1000u && de_layer_geo_ok(DE_Layer2_W, DE_Layer2_H))
-        de_merge_layer_rgb565_into(dst, row, DE_Layer2_Ptr, DE_Layer2_Pitch, (u16)DE_Layer2_W,
-                                   (u16)DE_Layer2_H, DE_PipLayer1, DE_CKey1, DE_AlphaHw[0]);
-    if (DE_Layer3_Ptr >= 0x1000u && de_layer_geo_ok(DE_Layer3_W, DE_Layer3_H))
-        de_merge_layer_rgb565_into(dst, row, DE_Layer3_Ptr, DE_Layer3_Pitch, (u16)DE_Layer3_W,
-                                   (u16)DE_Layer3_H, DE_PipLayer2, DE_CKey2, DE_AlphaHw[1]);
+    if (de_read_guest_layer_to_panel(dst, row, DE_PANEL_W, DE_PANEL_H, mainBase, mainPitch, gw, gh) != 0)
+        return -1;
+
+    /* PIP Layer1 (IDA a1=1)：仅在明显是 PIP 小层时叠加 */
+    if (DE_Layer1_Ptr >= 0x1000u && DE_Layer1_Ptr != mainBase && de_is_pip_sized(DE_Layer1_W, DE_Layer1_H))
+        de_merge_layer_rgb565_into(dst, row, DE_Layer1_Ptr,
+                                   de_pitch_or_default(DE_Layer1_Pitch, DE_Layer1_W),
+                                   (u16)DE_Layer1_W, (u16)DE_Layer1_H,
+                                   DE_PipLayer1, DE_CKey1, DE_AlphaHw[0]);
+    /* PIP Layer2 (IDA a1=2) */
+    if (DE_Layer2_Ptr >= 0x1000u && DE_Layer2_Ptr != mainBase &&
+        DE_Layer2_Ptr != DE_Layer1_Ptr && de_is_pip_sized(DE_Layer2_W, DE_Layer2_H))
+        de_merge_layer_rgb565_into(dst, row, DE_Layer2_Ptr,
+                                   de_pitch_or_default(DE_Layer2_Pitch, DE_Layer2_W),
+                                   (u16)DE_Layer2_W, (u16)DE_Layer2_H,
+                                   DE_PipLayer2, DE_CKey2, DE_AlphaHw[1]);
+    /* PIP Layer3 (IDA a1=3) */
+    if (DE_Layer3_Ptr >= 0x1000u && DE_Layer3_Ptr != mainBase &&
+        DE_Layer3_Ptr != DE_Layer1_Ptr && DE_Layer3_Ptr != DE_Layer2_Ptr &&
+        de_is_pip_sized(DE_Layer3_W, DE_Layer3_H))
+        de_merge_layer_rgb565_into(dst, row, DE_Layer3_Ptr,
+                                   de_pitch_or_default(DE_Layer3_Pitch, DE_Layer3_W),
+                                   (u16)DE_Layer3_W, (u16)DE_Layer3_H,
+                                   DE_PipLayer3, DE_CKey3, DE_AlphaHw[2]);
     return 0;
 }
 
 static int de_read_fb_composite_full(void)
 {
-    return de_read_fb_composite_into(Lcd_Cache_Buffer, sizeof(Lcd_Cache_Buffer));
+    /* 写 Lcd_Cache_Buffer，需与主线程读（de_blit_to_sdl）互斥 */
+    pthread_mutex_lock(&g_lcd_frame_mutex);
+    int r = de_read_fb_composite_into(Lcd_Cache_Buffer, sizeof(Lcd_Cache_Buffer));
+    pthread_mutex_unlock(&g_lcd_frame_mutex);
+    return r;
 }
 #endif /* MORAL_DE_LAYER_COMPOSITE */
 
@@ -737,10 +849,12 @@ static void de_try_snapshot_fb_at_de_trigger(u32 srcBuf_in, u32 pitch_in, u16 w_
     {
         De_LastTriggerTime = now;
         De_PeriodicRefreshAllowed = 1;
+        /* 整屏刷新时，srcBuf 就是帧缓冲基址，更新 Lcd_FullScreen_Ptr */
+        if (w >= (DE_PANEL_W - 20u) && h >= (DE_PANEL_H - 80u))
+            Lcd_FullScreen_Ptr = srcBuf;
         /*
-         * 禁止把 Lcd_FullScreen_Ptr 改成本次 srcBuf_in：局部刷新时 src 是子矩形首地址，
-         * 若当作基址则 off=0 → 画到左上角；扩展整屏读也会从错误地址拉满屏 → 整屏错位/底边花屏。
-         * 全屏基址只应由 0x74003040 / FMark 等路径更新；扩展读用 layer0 或已有 FullScreen 基址。
+         * 局部刷新时：srcBuf 是脏区首地址，需找到包含它的帧缓冲基址并扩展为整屏读，
+         * 否则只画局部矩形到 SDL，其他区域保持不变（这在真机上由 DE DMA 完成）。
          */
         if (w < (DE_PANEL_W - 20u) || h < (DE_PANEL_H - 80u))
         {
@@ -748,7 +862,7 @@ static void de_try_snapshot_fb_at_de_trigger(u32 srcBuf_in, u32 pitch_in, u16 w_
             if (expandBase != 0u)
             {
                 srcBuf = expandBase;
-                pitch = de_row_pitch_for_layer_base(expandBase);
+                pitch = de_guest_pitch_for_full_panel_read(expandBase);
                 w = (u16)DE_PANEL_W;
                 h = (u16)DE_PANEL_H;
             }
@@ -853,7 +967,7 @@ void de_emulator_flush_pending(void)
         if (expandBase != 0u)
         {
             srcBuf = expandBase;
-            pitch = de_row_pitch_for_layer_base(expandBase);
+            pitch = de_guest_pitch_for_full_panel_read(expandBase);
             w = (u16)DE_PANEL_W;
             h = (u16)DE_PANEL_H;
         }
@@ -930,7 +1044,9 @@ void de_emulator_periodic_refresh(void)
         if (De_LastTriggerTime != 0 && (now - De_LastTriggerTime) < idle_threshold)
             return;
 
-        u32 srcBuf = Lcd_FullScreen_Ptr;
+        /* 周期拉帧：优先 DE_Layer0_Ptr（OP 主层），回退 Lcd_FullScreen_Ptr */
+        u32 srcBuf = (DE_Layer0_Ptr >= 0x1000u && DE_Layer0_Ptr < 0x8000000u)
+                     ? DE_Layer0_Ptr : Lcd_FullScreen_Ptr;
         if (srcBuf < 0x1000u || srcBuf >= 0x8000000u)
             srcBuf = Lcd_Buffer_Ptr;
         if (srcBuf < 0x1000u || srcBuf >= 0x8000000u)
@@ -954,7 +1070,7 @@ void de_emulator_periodic_refresh(void)
 #endif
             if (!got)
             {
-                u32 pitch = DE_PANEL_W * DE_BPP;
+                u32 pitch = de_panel_read_pitch_from_base(srcBuf);
 
                 if (de_read_fb_to(Lcd_Periodic_Buffer, sizeof(Lcd_Periodic_Buffer),
                                   srcBuf, pitch, DE_PANEL_W, DE_PANEL_H) != 0)
@@ -1008,7 +1124,7 @@ void de_emulator_service_guest_fb_pull(void)
                 if (expandBase != 0u)
                 {
                     srcBuf = expandBase;
-                    pitch = de_row_pitch_for_layer_base(expandBase);
+                    pitch = de_guest_pitch_for_full_panel_read(expandBase);
                     w = (u16)DE_PANEL_W;
                     h = (u16)DE_PANEL_H;
                 }
@@ -1088,7 +1204,8 @@ void de_emulator_service_guest_fb_pull(void)
         if (De_LastTriggerTime != 0 && (now - De_LastTriggerTime) < 100)
             return;
 
-        srcBuf = Lcd_FullScreen_Ptr;
+        srcBuf = (DE_Layer0_Ptr >= 0x1000u && DE_Layer0_Ptr < 0x8000000u)
+                 ? DE_Layer0_Ptr : Lcd_FullScreen_Ptr;
         if (srcBuf < 0x1000u || srcBuf >= 0x8000000u)
             srcBuf = Lcd_Buffer_Ptr;
         if (srcBuf < 0x1000u || srcBuf >= 0x8000000u)
@@ -1104,7 +1221,7 @@ void de_emulator_service_guest_fb_pull(void)
             }
         }
 
-        pitch = DE_PANEL_W * DE_BPP;
+        pitch = de_panel_read_pitch_from_base(srcBuf);
         {
             int got = 0;
 #if MORAL_DE_LAYER_COMPOSITE
@@ -1275,60 +1392,92 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 printf("[lcd]layer_sel[%x] #%u\n", (u32)value, layer_sel_cnt);
         }
         break;
-    case 0x74003040:
+    case 0x7400303C:
         if (type == UC_MEM_WRITE)
-        {
-            Lcd_Buffer_Ptr &= 0xffff0000;
-            Lcd_Buffer_Ptr |= (value & 0xffff);
-            De_PeriodicRefreshAllowed = 1;
-            Lcd_FullScreen_Ptr = Lcd_Buffer_Ptr;
-        }
+            DE_DispLayerWidthMask = (u32)value;
         break;
+    /* === DE Layer 缓冲指针寄存器 ===
+     * IDA HalDispSetBufInfo 写序：先 W/H/pitch，再写 hi(ptr+4)，最后写 lo(ptr+0)。
+     * main.c 钩住了 HalDispTransAddr(0x1e574)，直接把原始物理地址写入，不做减法。
+     * 因此寄存器里存的已经是完整 GPA（>= 0xC000000），不需要额外加偏移。
+     * 寄存器宽度 16位，hi/lo 各16位拼成完整32位地址。
+     */
+    /* Layer0 hi (先写) */
     case 0x74003044:
         if (type == UC_MEM_WRITE)
         {
-            Lcd_Buffer_Ptr &= 0x0000ffff;
-            Lcd_Buffer_Ptr |= ((value & 0xffff) << 16);
+            DE_Layer0_Ptr &= 0x0000ffffu;
+            DE_Layer0_Ptr |= (((u32)value & 0xffffu) << 16);
         }
         break;
-    case 0x74003054:
+    /* Layer0 lo (后写，地址完整)
+     * 注意：此值是帧缓冲 + 脏区偏移后的地址（IDA：HalDispSetLayerBuffer 计算 bufPtr+offset）。
+     * Lcd_Buffer_Ptr 跟踪当前 trigger 用的地址。
+     * Lcd_FullScreen_Ptr（帧缓冲基址）仅在 FMark/整屏时更新，不在此处设置。
+     */
+    case 0x74003040:
         if (type == UC_MEM_WRITE)
         {
-            DE_Layer0_Ptr &= 0xffff0000;
-            DE_Layer0_Ptr |= (value & 0xffff);
+            DE_Layer0_Ptr &= 0xffff0000u;
+            DE_Layer0_Ptr |= ((u32)value & 0xffffu);
+            Lcd_Buffer_Ptr = DE_Layer0_Ptr;
+            De_PeriodicRefreshAllowed = 1;
         }
         break;
-    case 0x74003058:
+    case 0x74003048:
+        if (type == UC_MEM_WRITE)
+            DE_Layer0_W = (u32)value;
+        break;
+    case 0x7400304C:
+        if (type == UC_MEM_WRITE)
+            DE_Layer0_H = (u32)value;
+        break;
+    case 0x74003050:
+        if (type == UC_MEM_WRITE)
+            DE_Layer0_Pitch = (u32)value;
+        break;
+
+    /* === DE Layer1 (IDA a1=1, PIP1) === */
+    case 0x74003058: /* hi */
         if (type == UC_MEM_WRITE)
         {
-            DE_Layer0_Ptr &= 0x0000ffff;
-            DE_Layer0_Ptr |= ((value & 0xffff) << 16);
+            DE_Layer1_Ptr &= 0x0000ffffu;
+            DE_Layer1_Ptr |= (((u32)value & 0xffffu) << 16);
         }
         break;
-    case 0x7400305c:
+    case 0x74003054: /* lo */
         if (type == UC_MEM_WRITE)
-            DE_Layer0_W = value;
+        {
+            DE_Layer1_Ptr &= 0xffff0000u;
+            DE_Layer1_Ptr |= ((u32)value & 0xffffu);
+        }
+        break;
+    case 0x7400305C:
+        if (type == UC_MEM_WRITE)
+            DE_Layer1_W = (u32)value;
         break;
     case 0x74003060:
         if (type == UC_MEM_WRITE)
-            DE_Layer0_H = value;
+            DE_Layer1_H = (u32)value;
         break;
     case 0x74003064:
         if (type == UC_MEM_WRITE)
-            DE_Layer0_Pitch = value;
+            DE_Layer1_Pitch = (u32)value;
         break;
-    case 0x74003068:
-        if (type == UC_MEM_WRITE)
-        {
-            DE_Layer2_Ptr &= 0xffff0000u;
-            DE_Layer2_Ptr |= ((u32)value & 0xffffu);
-        }
-        break;
-    case 0x7400306C:
+
+    /* === DE Layer2 (IDA a1=2, PIP2) === */
+    case 0x7400306C: /* hi */
         if (type == UC_MEM_WRITE)
         {
             DE_Layer2_Ptr &= 0x0000ffffu;
             DE_Layer2_Ptr |= (((u32)value & 0xffffu) << 16);
+        }
+        break;
+    case 0x74003068: /* lo */
+        if (type == UC_MEM_WRITE)
+        {
+            DE_Layer2_Ptr &= 0xffff0000u;
+            DE_Layer2_Ptr |= ((u32)value & 0xffffu);
         }
         break;
     case 0x74003070:
@@ -1343,18 +1492,20 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         if (type == UC_MEM_WRITE)
             DE_Layer2_Pitch = (u32)value;
         break;
-    case 0x74003080:
-        if (type == UC_MEM_WRITE)
-        {
-            DE_Layer3_Ptr &= 0xffff0000u;
-            DE_Layer3_Ptr |= ((u32)value & 0xffffu);
-        }
-        break;
-    case 0x74003084:
+
+    /* === DE Layer3 (IDA a1=3, PIP3) === */
+    case 0x74003084: /* hi */
         if (type == UC_MEM_WRITE)
         {
             DE_Layer3_Ptr &= 0x0000ffffu;
             DE_Layer3_Ptr |= (((u32)value & 0xffffu) << 16);
+        }
+        break;
+    case 0x74003080: /* lo */
+        if (type == UC_MEM_WRITE)
+        {
+            DE_Layer3_Ptr &= 0xffff0000u;
+            DE_Layer3_Ptr |= ((u32)value & 0xffffu);
         }
         break;
     case 0x74003088:
@@ -1453,25 +1604,53 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         if (type == UC_MEM_WRITE)
             DE_PipLayer2[3] = (u16)(u32)value;
         break;
+    /* PIP Layer3 位置寄存器（IDA HalDispSetPIP case 3） */
+    case 0x740030C0:
+        if (type == UC_MEM_WRITE)
+            DE_PipLayer3[0] = (u16)(u32)value;
+        break;
+    case 0x740030C4:
+        if (type == UC_MEM_WRITE)
+            DE_PipLayer3[1] = (u16)(u32)value;
+        break;
+    case 0x740030C8:
+        if (type == UC_MEM_WRITE)
+            DE_PipLayer3[2] = (u16)(u32)value;
+        break;
+    case 0x740030CC:
+        if (type == UC_MEM_WRITE)
+            DE_PipLayer3[3] = (u16)(u32)value;
+        break;
     case 0x7400313C:
         if (type == UC_MEM_WRITE)
         {
-            u32 srcBuf = Lcd_Buffer_Ptr;
-            u32 pitch = Lcd_Update_Pitch;
-            u16 w = (u16)Lcd_Update_W;
-            u16 h = (u16)Lcd_Update_H;
+            /*
+             * DE trigger（IDA：HalDispForceUpdate 写 0x7400313C=1）。
+             * 此时 HalDispSetBufInfo 已把脏区参数写入寄存器：
+             *   0x74003040 = bufPtr（帧缓冲 + 脏区左上角偏移）
+             *   0x74003048 = 脏区 width
+             *   0x7400304C = 脏区 height
+             *   0x74003050 = pitch（固定 = 2 × 屏宽 = 480，整屏行距）
+             * 所以直接用 DE_Layer0_* 即可，不需要 Lcd_Update_W/H。
+             */
+            u32 srcBuf = DE_Layer0_Ptr;
+            u16 w = (DE_Layer0_W > 0u && DE_Layer0_W <= (u32)DE_PANEL_W) ? (u16)DE_Layer0_W : (u16)DE_PANEL_W;
+            u16 h = (DE_Layer0_H > 0u && DE_Layer0_H <= (u32)DE_PANEL_H) ? (u16)DE_Layer0_H : (u16)DE_PANEL_H;
+            u32 pitch = (DE_Layer0_Pitch >= (u32)w * DE_BPP && DE_Layer0_Pitch < 8192u)
+                        ? DE_Layer0_Pitch : (u32)w * DE_BPP;
 
             static u32 de_trigger_cnt = 0;
             static u32 boot_desc_buf = 0;
             de_trigger_cnt++;
 
-            // if (w == 0 || h == 0 || srcBuf < 0x1000u || srcBuf >= 0x8000000u)
-            // {
-            //     tmp = 0xF00;
-            //     uc_mem_write(MTK, 0x74003148u, &tmp, 4);
-            //     lcd_irq_enqueue_throttled();
-            //     break;
-            // }
+            /* srcBuf 无效时直接发 IRQ 跳过，不读 Guest 内存 */
+            if (srcBuf < 0x1000u || srcBuf >= 0x8000000u || w == 0u || h == 0u)
+            {
+                tmp = 0xF00;
+                uc_mem_write(MTK, 0x74003148u, &tmp, 4);
+                lcd_irq_enqueue_throttled();
+                break;
+            }
 
             if (de_trigger_cnt == 1 && w >= DE_PANEL_W && h >= DE_PANEL_H)
                 boot_desc_buf = srcBuf;
@@ -1501,10 +1680,11 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             if (pitch == 0u)
                 pitch = (u32)w * DE_BPP;
 
-            if (MORAL_LOG_HOT_PATH && (de_trigger_cnt <= 20 || (de_trigger_cnt % 100) == 0))
+            if (de_trigger_cnt <= 30 || (de_trigger_cnt % 200) == 0)
             {
-                printf("[DE-trigger] #%u buf=0x%x pitch=%u w=%u h=%u\n",
-                       de_trigger_cnt, srcBuf, pitch, w, h);
+                printf("[DE-trigger] #%u L0=0x%x W=%u H=%u pitch=%u | L1=0x%x W=%u | srcBuf=0x%x w=%u h=%u\n",
+                       de_trigger_cnt, DE_Layer0_Ptr, DE_Layer0_W, DE_Layer0_H, DE_Layer0_Pitch,
+                       DE_Layer1_Ptr, DE_Layer1_W, srcBuf, w, h);
             }
 
             u8 is_cursor_de = (w <= 20u && h <= 20u);
@@ -1549,6 +1729,25 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 if (MORAL_LOG_HOT_PATH && fmark_clear_cnt <= 10)
                     printf("[FMark-clear] #%u pc=0x%x %s\n", fmark_clear_cnt, pc_val,
                            is_reset ? "(HalDispReset)" : "(SWFMark)");
+                if (is_reset)
+                {
+                    /* HalDispReset：清所有 PIP 子层镜像，避免旧寄存器在下一帧被误合成。
+                     * Layer0 (OP 主层) 由下一次 HalDispSetBufInfo(0,...) 覆盖，此处不清除。 */
+                    DE_Layer1_Ptr = 0; DE_Layer1_W = 0; DE_Layer1_H = 0; DE_Layer1_Pitch = 0;
+                    DE_Layer2_Ptr = 0; DE_Layer2_W = 0; DE_Layer2_H = 0; DE_Layer2_Pitch = 0;
+                    DE_Layer3_Ptr = 0; DE_Layer3_W = 0; DE_Layer3_H = 0; DE_Layer3_Pitch = 0;
+                    DE_PipLayer1[0] = DE_PipLayer1[1] = DE_PipLayer1[2] = DE_PipLayer1[3] = 0;
+                    DE_PipLayer2[0] = DE_PipLayer2[1] = DE_PipLayer2[2] = DE_PipLayer2[3] = 0;
+                    DE_PipLayer3[0] = DE_PipLayer3[1] = DE_PipLayer3[2] = DE_PipLayer3[3] = 0;
+                    DE_CKey1[0] = DE_CKey1[1] = DE_CKey1[2] = 0;
+                    DE_CKey2[0] = DE_CKey2[1] = DE_CKey2[2] = 0;
+                    DE_CKey3[0] = DE_CKey3[1] = DE_CKey3[2] = 0;
+                    DE_AlphaHw[0] = DE_AlphaHw[1] = DE_AlphaHw[2] = 0;
+                    DE_ColorKeyCtrl = 0;
+                    DE_DispLayerWidthMask = 0;
+                    Lcd_Update_W = 0;
+                    Lcd_Update_H = 0;
+                }
                 tmp = 0xF00;
                 uc_mem_write(MTK, 0x74003148u, &tmp, 4);
                 break;
@@ -1578,25 +1777,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         {
             tmp = 3;
             uc_mem_write(MTK, (u32)address, &tmp, 4);
-        }
-        break;
-
-    case 0x74003048:
-        if (type == UC_MEM_WRITE)
-        {
-            Lcd_Update_W = value;
-        }
-        break;
-    case 0x7400304C:
-        if (type == UC_MEM_WRITE)
-        {
-            Lcd_Update_H = value;
-        }
-        break;
-    case 0x74003050:
-        if (type == UC_MEM_WRITE)
-        {
-            Lcd_Update_Pitch = value;
         }
         break;
 
@@ -1922,6 +2102,13 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                                nandFlashCMD, act, lastAddress);
                     }
                 }
+                /*
+                 * NAND 操作在此已同步完成（数据搬运到 Guest 内存）。
+                 * 立即置 FICE_Status，使 NC_WaitComplete 的轮询立刻通过。
+                 * 不等 0x34002C10 异步触发——那条路径可能在 WaitComplete 之后才到。
+                 */
+                FICE_Status |= 0x02000200u;
+                nand_op_pending = 0;
             }
         }
         break;
