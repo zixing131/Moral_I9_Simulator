@@ -52,9 +52,20 @@ void Draw_Loading_Process()
 
 void renderGdiBufferToWindow()
 {
+    static uint64_t last_present_time = 0;
     if (Lcd_Need_Update)
     {
+        uint64_t now = moral_get_ticks_ms();
+        uint64_t min_interval = 1000 / 60;
+
+        if (min_interval < 1)
+            min_interval = 1;
+        if (last_present_time != 0 &&
+            (now - last_present_time) < min_interval)
+            return;
+
         Lcd_Need_Update = 0;
+        last_present_time = now;
         SDL_UpdateWindowSurface(window);
     }
 }

@@ -388,6 +388,22 @@ static u32 de_deferred_pitch = 0;
 static u16 de_deferred_w = 0;
 static u16 de_deferred_h = 0;
 static uint64_t de_deferred_last_draw = 0;
+static uint64_t lcd_irq_last_enqueue = 0;
+
+static void lcd_irq_enqueue_throttled(void)
+{
+    uint64_t now = moral_get_ticks_ms();
+    uint64_t min_interval = 1000 / 120;
+
+    if (min_interval < 1)
+        min_interval = 1;
+    if (lcd_irq_last_enqueue != 0 &&
+        (now - lcd_irq_last_enqueue) < min_interval)
+        return;
+
+    lcd_irq_last_enqueue = now;
+    EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
+}
 
 static void de_schedule_deferred_refresh(u32 srcBuf, u32 pitch, u16 w, u16 h)
 {
@@ -755,7 +771,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             {
                 tmp = 0xF00;
                 uc_mem_write(MTK, 0x74003148u, &tmp, 4);
-                EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
+                lcd_irq_enqueue_throttled();
                 break;
             }
 
@@ -777,7 +793,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                     {
                         tmp = 0xF00;
                         uc_mem_write(MTK, 0x74003148u, &tmp, 4);
-                        EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
+                        lcd_irq_enqueue_throttled();
                         break;
                     }
                     else
@@ -842,7 +858,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 de_schedule_deferred_refresh(srcBuf, pitch, w, h);
                 tmp = 0xF00;
                 uc_mem_write(MTK, 0x74003148u, &tmp, 4);
-                EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
+                lcd_irq_enqueue_throttled();
             }
         }
         break;
@@ -884,7 +900,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                     Lcd_FullScreen_Ptr = srcBuf;
                     De_PeriodicRefreshAllowed = 1;
                 }
-                EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
+                lcd_irq_enqueue_throttled();
             }
             tmp = 0xF00;
             uc_mem_write(MTK, 0x74003148u, &tmp, 4);
