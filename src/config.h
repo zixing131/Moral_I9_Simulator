@@ -69,6 +69,11 @@
 #define MORAL_LOG_KERNEL_TRACE 0
 #endif
 
+/* 指令级补丁调试：如 0xEE9DC 软执行 LDRH、INSN_INVALID 等；默认关，避免控制台刷屏 */
+#ifndef MORAL_LOG_UC_CODE_PATCH
+#define MORAL_LOG_UC_CODE_PATCH 0
+#endif
+
 #ifndef MORAL_LOG_SD_IO
 #define MORAL_LOG_SD_IO 0
 #endif

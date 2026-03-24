@@ -3,6 +3,12 @@
 #include "touchscreen.h"
 #include <string.h>
 
+/*
+ * hookRam.c：Guest 对 MMIO 的读写在 Unicorn 里走 UC_HOOK_MEM_READ/WRITE，由此回调模拟硬件。
+ * 含 SPI、定时器、显示引擎 DE、FCIE(NAND/SD)、UART、中断控制器、触摸 AUXADC、GPT、MSDC 等。
+ * 与 main.c 的 UC_HOOK_CODE 分工：代码钩子改执行流/寄存器，本文件只伪造寄存器值与 DMA 数据搬运。
+ */
+
 bool hookInsnInvalid(uc_engine *uc, void *user_data);
 void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data);
 void handleLcdReg(uint64_t address, u32 data, uint64_t value);
@@ -265,8 +271,10 @@ static void de_blit_to_sdl(u16 dstX, u16 dstY, u16 w, u16 h, u32 cachePitch)
     if (!de_blit_logged)
     {
         de_blit_logged = 1;
+#if MORAL_LOG_HOT_PATH
         printf("[SDL-surface] w=%d h=%d pitch=%d bpp=%d Rmask=0x%x\n",
                sfc->w, sfc->h, sfc->pitch, sfc->format->BytesPerPixel, sfc->format->Rmask);
+#endif
     }
 
     de_blit_rgb565_to_surface(sfc, Lcd_Cache_Buffer, dstX, dstY, w, h, cachePitch);
@@ -525,9 +533,10 @@ void de_emulator_periodic_refresh(void)
 
 void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
 {
+    (void)uc;
+    (void)data;
 
     u32 tmp;
-    u32 *ptr1;
     switch (address)
     {
     case 0x74006CA8:
@@ -938,6 +947,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             uc_mem_write(MTK, (u32)address, &tmp, 4);
         }
         break;
+    /* NAND FCIE：命令字与参数经 AUX 寄存器写入，NC_CTRL 置位后在本文件内填 DMA/CIFD */
     case NC_AUXREG_ADR:
         if (type == UC_MEM_WRITE)
         {
@@ -1466,6 +1476,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             uc_mem_write(MTK, (u32)address, &value, 4);
         }
         break;
+    /* 未在 switch 中逐例列出的地址：触摸 AUXADC 窗口、GPT、MSDC 等 */
     default:
         if (address >= 0x3400C080u && address < 0x3400C400u)
         {
@@ -1522,25 +1533,33 @@ bool hookInsnInvalid(uc_engine *uc, void *user_data)
 
     if (pc == 0x7C322C || pc == 0x7C3238)
     {
+#if MORAL_LOG_UC_CODE_PATCH
         printf("mrc指令:%x\n", insn);
+#endif
         return 0;
     }
 
     uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
     if ((cpsr & 0x20u) == 0u)
     {
-        static u32 arm_thumb_fix_log = 32u;
         u32 nc = cpsr | 0x20u;
         uc_reg_write(MTK, UC_ARM_REG_CPSR, &nc);
-        if (arm_thumb_fix_log > 0u)
+#if MORAL_LOG_UC_CODE_PATCH
         {
-            arm_thumb_fix_log--;
-            printf("[UC] INSN_INVALID: T=0→1 继续 PC=%08x insn=%08x (mode=%02x)\n",
-                   pc, insn, cpsr & 0x1fu);
+            static u32 arm_thumb_fix_log = 32u;
+            if (arm_thumb_fix_log > 0u)
+            {
+                arm_thumb_fix_log--;
+                printf("[UC] INSN_INVALID: T=0→1 继续 PC=%08x insn=%08x (mode=%02x)\n",
+                       pc, insn, cpsr & 0x1fu);
+            }
         }
+#endif
         return 1;
     }
 
+#if MORAL_LOG_UC_CODE_PATCH
     printf("指令无效:%x\n", insn);
+#endif
     return 0;
 }

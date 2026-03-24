@@ -18,6 +18,12 @@
 #include "touchscreen.c"
 #include "vmEvent.c"
 
+/*
+ * main.c：主程序入口与 Unicorn 生命周期（initMtkSimalator / RunArmProgram）、SDL 主循环。
+ * hookCodeCallBack：在特定 PC 上于「指令执行前」打桩（RTC、DMA、异常路径等）。
+ * hookRam.c 经 #include 并入本翻译单元，负责 UC_HOOK_MEM_* 的 MMIO（DE/FCIE/定时器/触摸等）。
+ */
+
 #ifdef GDB_SERVER_SUPPORT
 #include "gdb_client.c"
 pthread_t gdb_server_mutex;
@@ -1078,7 +1084,9 @@ static void moral_uc_write_low_and_xram(const u8 *buf, size_t total)
         else if (total - low_max > rest)
             printf("[mem] WARN: %u bytes beyond low+XRAM not loaded\n", (unsigned)(total - low_max - rest));
     }
-} 
+}
+
+/* 打开 ARM 引擎、映射 ROM/RAM/IRAM/XRAM/外设窗口，注册 CODE hook 与 MMIO 读写回调 */
 void initMtkSimalator()
 {
     uc_err err;
@@ -1194,7 +1202,10 @@ void initMtkSimalator()
         printf("[mem] Mapped 0x81000000..0x83000000 (RTC / AUX / GPT / legacy IRQ regs)\n");
         InitSimCardRegs();
     }
-    /* 只对需要 hook 的地址范围注册 UC_HOOK_CODE，避免每条指令都调用回调 */
+    /*
+     * 代码钩子地址表：每项 [起始,结束] 含两端。Thumb 下 PC 可能为偶地址或 +1，
+     * 故像 0xEE9DC 这类 16 位指令常登记两字节区间。
+     */
     {
         static uc_hook code_hooks[32];
         int hi = 0;
@@ -1720,13 +1731,15 @@ void hookBlockCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *use
     (void)user_data;
 }
 
-/**
- * pc指针指向此地址时执行(未执行此地址的指令)
- */
+/* UC_HOOK_CODE 在取指后、执行当前 PC 指令之前调用；此处改寄存器/PC 即替代该条指令效果 */
 
 u8 mssend_pop_log = 0;
 
-/* 0xEE9DC: LDRH R1,[R1,#34]，Unicorn 异常 → uc_mem_read 模拟 */
+/*
+ * Thumb 指令 LDRH R1,[R1,#34]（半字约 0x8C49，hwll1_ReadE2pParameters 路径）。
+ * 真机正常执行；当前 Unicorn 组合下会触发 UC_ERR_EXCEPTION，故在 0xEE9DC 用代码钩子
+ * 手工读半字写回 R1 并将 PC+=2。与 ker_trace 无因果关系，仅调用顺序上可能相邻。
+ */
 static void moral_emu_thumb_ldrh_r1_r1_plus34(void)
 {
     u32 base, cpsr, pc_raw, npc, r1_out;
@@ -1752,6 +1765,9 @@ static void moral_emu_thumb_ldrh_r1_r1_plus34(void)
 void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
     u32 tmp1, tmp2, tmp3, tmp4;
+    (void)uc;
+    (void)size;
+    (void)user_data;
 
     if (((u32)address & ~1u) == 0x31b9c)
     {
@@ -2103,6 +2119,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     case 0xEE9DC:
     case 0xEE9DD:
     {
+#if MORAL_LOG_UC_CODE_PATCH
         static u32 moral_ee9dc_log;
         if (moral_ee9dc_log < 4u)
         {
@@ -2110,8 +2127,9 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
             u16 hw = 0;
             moral_ee9dc_log++;
             if (uc_mem_read(MTK, tpc, &hw, 2) == UC_ERR_OK)
-                printf("[UC] emu LDRH R1,[R1,#34] @%08x half=%04x (hwll1_ReadE2pParameters)\n", tpc, hw);
+                printf("[UC] patch LDRH R1,[R1,#34] @%08x half=%04x\n", tpc, hw);
         }
+#endif
         moral_emu_thumb_ldrh_r1_r1_plus34();
         break;
     }
