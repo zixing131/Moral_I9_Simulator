@@ -56,7 +56,6 @@ static inline void SDL_PutPixel32(SDL_Surface *s, unsigned x, unsigned y, Uint32
  */
 char *getRealMemPtr(u32 ptr);
 void SimulateMstarPressKey(u8, u8);
-void RunArmProgram(void *);
 void hookBlockCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 extern u8 mssend_pop_log;

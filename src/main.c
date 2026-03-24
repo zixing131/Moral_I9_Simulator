@@ -18,8 +18,12 @@
 #include "touchscreen.c"
 #include "vmEvent.c"
 
+void dumpCpuInfo(void);
+static void moral_perf_tick(void);
+
 /*
- * main.c：主程序入口与 Unicorn 生命周期（initMtkSimalator / RunArmProgram）、SDL 主循环。
+ * main.c：主程序入口与 Unicorn 生命周期（initMtkSimalator）、SDL 主循环。
+ * CPU 模拟与外设 tick（原 emu_thread + screen_render_thread）均在 loop() 单线程内协作运行。
  * hookCodeCallBack：在特定 PC 上于「指令执行前」打桩（RTC、DMA、异常路径等）。
  * hookRam.c 经 #include 并入本翻译单元，负责 UC_HOOK_MEM_* 的 MMIO（DE/FCIE/定时器/触摸等）。
  */
@@ -163,9 +167,6 @@ u32 debugAddress;
 
 SDL_Keycode isKeyDown = SDLK_UNKNOWN;
 bool isMouseDown = false;
-pthread_t emu_thread;
-pthread_t screen_render_thread;
-
 
 u8 currentProgramDir[256] = {0};
 
@@ -383,11 +384,139 @@ void mouseEvent(int type, int x, int y)
     EnqueueVMEvent(VM_EVENT_TOUCH_SCREEN_IRQ, type, (x << 16) | y);
 }
 
+/* 单线程：每轮主循环内连续跑模拟的毫秒上限，再处理 SDL，避免窗口卡死 */
+#ifndef MORAL_EMU_MS_PER_MAIN_ITER
+#define MORAL_EMU_MS_PER_MAIN_ITER 5u
+#endif
+
+static u32 s_moral_emu_pc;
+static u32 s_moral_emu_cpsr;
+static int s_moral_emu_halted;
+
+static void moral_emu_on_stop(uc_err p)
+{
+    if (p == UC_ERR_READ_UNMAPPED)
+        printf("模拟错误：此处内存不可读\n");
+    else if (p == UC_ERR_WRITE_UNMAPPED)
+        printf("模拟错误：此处内存不可写\n");
+    else if (p == UC_ERR_FETCH_UNMAPPED)
+        printf("模拟错误：此处内存不可执行\n");
+    else if (p != UC_ERR_OK)
+        printf("模拟错误：(未处理)%s\n", uc_strerror(p));
+    dumpCpuInfo();
+#ifdef GDB_SERVER_SUPPORT
+    send_gdb_response(&clients[0], "S01");
+#endif
+    s_moral_emu_halted = 1;
+}
+
+static void moral_emu_prepare(void *startAddr)
+{
+    u32 pc = (u32)(uintptr_t)startAddr;
+
+    s_moral_emu_halted = 0;
+#ifdef GDB_SERVER_SUPPORT
+    gdbTarget.running = 1;
+    gdbTarget.breakpoints[gdbTarget.num_breakpoints++] = pc;
+    readAllCpuRegFunc = ReadRegsToGdb;
+    gdb_readMemFunc = readMemoryToGdb;
+#endif
+    uc_reg_read(MTK, UC_ARM_REG_CPSR, &s_moral_emu_cpsr);
+    s_moral_emu_pc = pc;
+}
+
+static void moral_emu_run_slice(void)
+{
+    uc_err p;
+    int pending_before;
+    uint64_t timeout_us;
+    uint64_t instr_count;
+    uint64_t start_pc;
+
+    if (MTK == NULL || s_moral_emu_halted)
+        return;
+
+    pending_before = moral_vm_has_pending_events();
+    timeout_us = pending_before ? 4000u : 100000u;
+    instr_count = pending_before ? 50000u : 400000u;
+    start_pc = (uint64_t)(s_moral_emu_pc & ~1u);
+    if (s_moral_emu_cpsr & 0x20)
+        start_pc |= 1;
+
+    p = uc_emu_start(MTK, start_pc, (uint64_t)-1, timeout_us, instr_count);
+    uc_reg_read(MTK, UC_ARM_REG_PC, &s_moral_emu_pc);
+    uc_reg_read(MTK, UC_ARM_REG_CPSR, &s_moral_emu_cpsr);
+
+    if (p != UC_ERR_OK)
+    {
+        moral_emu_on_stop(p);
+        return;
+    }
+    if (pending_before || moral_vm_has_pending_events())
+    {
+        handleVmEvent_EMU((uint64_t)s_moral_emu_pc);
+        uc_reg_read(MTK, UC_ARM_REG_PC, &s_moral_emu_pc);
+        uc_reg_read(MTK, UC_ARM_REG_CPSR, &s_moral_emu_cpsr);
+    }
+}
+
+/* 原 MainUpdateTask 每轮一次（去掉独立线程与 usleep） */
+static void moral_mainupdate_tick_once(void)
+{
+    uint64_t elapsed_ms;
+
+    currentTime = moral_get_ticks_ms();
+
+#ifdef GDB_SERVER_SUPPORT
+    if (gdbTarget.running == 0)
+        return;
+#endif
+    lcdTaskMain();
+    RtcTaskMain();
+    GptTaskMain();
+    SimTaskMain();
+
+    if (last_hal_timer_tick_time == 0)
+        last_hal_timer_tick_time = currentTime;
+    elapsed_ms = currentTime - last_hal_timer_tick_time;
+    if (elapsed_ms > 100)
+        elapsed_ms = 100;
+    if (elapsed_ms > 0)
+    {
+        last_hal_timer_tick_time = currentTime;
+        halTimerCount += (u32)elapsed_ms;
+
+        if (halTimerOutLength > 0)
+        {
+            uint64_t next_tick = (uint64_t)halTimerCnt + elapsed_ms;
+            if (next_tick >= (uint64_t)halTimerOutLength)
+            {
+                halTimerCnt = (u32)(next_tick % (uint64_t)halTimerOutLength);
+                if (halTimerIntStatus == 1)
+                    timer_irq_pending = 1;
+            }
+            else
+                halTimerCnt = (u32)next_tick;
+        }
+        else
+            halTimerCnt += (u32)elapsed_ms;
+    }
+    if (currentTime > lastFlashTime)
+    {
+        lastFlashTime = currentTime + 300;
+        fflush(stdout);
+    }
+
+    moral_perf_tick();
+}
+
 void loop()
 {
-    void *thread_ret;
     SDL_Event ev;
     bool isLoop = true;
+
+    moral_emu_prepare((void *)(uintptr_t)ROM_ADDRESS);
+
     while (isLoop)
     {
         while (SDL_PollEvent(&ev))
@@ -432,16 +561,33 @@ void loop()
         if (Lcd_Need_Update)
             renderGdiBufferToWindow();
 
+        moral_mainupdate_tick_once();
+
+        if (!s_moral_emu_halted)
+        {
+#ifdef GDB_SERVER_SUPPORT
+            if (gdbTarget.running != 0)
+#endif
+            {
+                uint64_t budget_end = moral_get_ticks_ms() + (uint64_t)MORAL_EMU_MS_PER_MAIN_ITER;
+                while (moral_get_ticks_ms() < budget_end && !s_moral_emu_halted)
+                {
+#ifdef GDB_SERVER_SUPPORT
+                    if (gdbTarget.running == 0)
+                        break;
+#endif
+                    moral_emu_run_slice();
+                }
+            }
+        }
+
         SDL_Delay(1);
     }
 
-    // 等待线程结束（pthread_t 按值传入，勿传 &thread）
-    pthread_join(emu_thread, &thread_ret);
-    pthread_join(screen_render_thread, &thread_ret);
     if (SD_File_Handle != NULL)
         fclose(SD_File_Handle);
     SD_File_Handle = NULL;
-    g_sd_img_max_bytes = 0; 
+    g_sd_img_max_bytes = 0;
 }
 
 /**
@@ -1456,120 +1602,6 @@ void FindNorFlashId()
         printf("Find NorFlash Id Failed\n");
 }
 
-void RunArmProgram(void *startAddr)
-{
-    u32 pc = (u32)(size_t)startAddr;
-    u32 cpsr = 0;
-    uc_err p;
-
-#ifdef GDB_SERVER_SUPPORT
-    gdbTarget.running = 1;
-    gdbTarget.breakpoints[gdbTarget.num_breakpoints++] = pc;
-    readAllCpuRegFunc = ReadRegsToGdb;
-    gdb_readMemFunc = readMemoryToGdb;
-#endif
-
-    uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
-
-    for (;;)
-    {
-        int pending_before = moral_vm_has_pending_events();
-        uint64_t timeout_us = pending_before ? 4000u : 100000u;
-        uint64_t instr_count = pending_before ? 50000u : 400000u;
-        uint64_t start_pc = (uint64_t)(pc & ~1u);
-        if (cpsr & 0x20)
-            start_pc |= 1;
-
-        p = uc_emu_start(MTK, start_pc, (uint64_t)-1, timeout_us, instr_count);
-        uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
-        uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
-
-        if (p != UC_ERR_OK)
-            break;
-
-        if (pending_before || moral_vm_has_pending_events())
-        {
-            handleVmEvent_EMU((uint64_t)pc);
-            uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
-            uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
-        }
-    }
-
-    if (p == UC_ERR_READ_UNMAPPED)
-        printf("模拟错误：此处内存不可读\n");
-    else if (p == UC_ERR_WRITE_UNMAPPED)
-        printf("模拟错误：此处内存不可写\n");
-    else if (p == UC_ERR_FETCH_UNMAPPED)
-        printf("模拟错误：此处内存不可执行\n");
-    else if (p != UC_ERR_OK)
-        printf("模拟错误：(未处理)%s\n", uc_strerror(p));
-    dumpCpuInfo();
-#ifdef GDB_SERVER_SUPPORT
-    send_gdb_response(&clients[0], "S01");
-#endif
-}
-
-void MainUpdateTask()
-{
-    while (1)
-    {
-        uint64_t elapsed_ms;
-        currentTime = moral_get_ticks_ms();
-
-#ifdef GDB_SERVER_SUPPORT
-        if (gdbTarget.running == 0)
-        {
-            usleep(1000);
-            continue;
-        }
-#endif
-        lcdTaskMain();
-        RtcTaskMain();
-        GptTaskMain();
-        SimTaskMain();
-
-        if (last_hal_timer_tick_time == 0)
-            last_hal_timer_tick_time = currentTime;
-        elapsed_ms = currentTime - last_hal_timer_tick_time;
-        if (elapsed_ms > 100)
-            elapsed_ms = 100;
-        if (elapsed_ms > 0)
-        {
-            last_hal_timer_tick_time = currentTime;
-            halTimerCount += (u32)elapsed_ms;
-
-            if (halTimerOutLength > 0)
-            {
-                uint64_t next_tick = (uint64_t)halTimerCnt + elapsed_ms;
-                if (next_tick >= (uint64_t)halTimerOutLength)
-                {
-                    halTimerCnt = (u32)(next_tick % (uint64_t)halTimerOutLength);
-                    if (halTimerIntStatus == 1)
-                        timer_irq_pending = 1;
-                }
-                else
-                    halTimerCnt = (u32)next_tick;
-            }
-            else
-                halTimerCnt += (u32)elapsed_ms;
-        }
-        // if (currentTime > last_gpt2_interrupt_time)
-        // {
-        //     last_gpt2_interrupt_time = currentTime + 200;
-        //     EnqueueVMEvent(VM_EVENT_Timer_IRQ, 13, 0);
-        // }
-        if (currentTime > lastFlashTime)
-        {
-            lastFlashTime = currentTime + 300;
-            fflush(stdout);
-        }
-
-        moral_perf_tick();
-
-        usleep(1000);
-    }
-}
-
 u32 getMapAddr(u32 addr)
 {
     if (addr >= 0x871A5F8 && addr <= (0x871A5F8 + 0x1188 - 0x200))
@@ -1617,7 +1649,7 @@ int main(int argc, char *args[])
         tmp = readFile(ROM_PROGRAM_BIN, &size);
         moral_uc_write_low_and_xram(tmp, size);
         SDL_free(tmp); 
-        
+
         tmp = readFile("Rom\\moral-i9.bin", &size);
         my_memcpy(NandFlashCard, tmp, size);
         SDL_free(tmp);
@@ -1682,9 +1714,7 @@ int main(int argc, char *args[])
             printf("[SD] 镜像 CSD 报告容量: %lu 扇区 (~%llu MiB)\n", sec, mb);
         }
 
-        // 启动emu线程
-        pthread_create(&emu_thread, NULL, RunArmProgram, ROM_ADDRESS);
-        pthread_create(&screen_render_thread, NULL, MainUpdateTask, NULL);
+        /* CPU 与外设 tick 在 loop() 主线程内运行（单线程模型） */
 #ifdef GDB_SERVER_SUPPORT
         pthread_create(&gdb_server_mutex, NULL, gdb_server_main, NULL);
 #endif
