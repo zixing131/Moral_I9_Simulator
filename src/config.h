@@ -65,6 +65,25 @@
 #endif
 
 /*
+ * 全屏/周期拉显存时按固件 HalDisp 多图层（0x74003054 / 68 / 80）与 PIP（0x740030A0 / B0）
+ * 做 RGB565 压盖合成。0=只读主层，Guest 读带宽更低但子层（状态栏叠加等）可能缺。
+ */
+#ifndef MORAL_DE_LAYER_COMPOSITE
+#define MORAL_DE_LAYER_COMPOSITE 1
+#endif
+
+/*
+ * 多图层合成时按 HalDisp 镜像寄存器做色键（0x740030DC..FC）与 Alpha（0x740030D0..D8）。
+ * 0=始终不透明整块 memcpy，略快但透明区域会糊成实心色导致花屏/错位感。
+ */
+#ifndef MORAL_DE_BLEND_COLORKEY
+#define MORAL_DE_BLEND_COLORKEY 1
+#endif
+#ifndef MORAL_DE_BLEND_ALPHA
+#define MORAL_DE_BLEND_ALPHA 1
+#endif
+
+/*
  * SDL_UpdateWindowSurface 最小间隔（毫秒）。0=每帧可 present（更顺滑，略增 CPU）。
  */
 #ifndef MORAL_LCD_PRESENT_MIN_INTERVAL_MS

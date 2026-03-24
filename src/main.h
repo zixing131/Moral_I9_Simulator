@@ -211,6 +211,30 @@ u32 DE_Layer0_W;
 u32 DE_Layer0_H;
 u32 DE_Layer0_Pitch;
 
+/* HalDispSetBufInfo case2/3 → 0x74003068、0x74003080（与 DE_Layer0 的 54 区并列的子图层） */
+u32 DE_Layer2_Ptr;
+u32 DE_Layer2_W;
+u32 DE_Layer2_H;
+u32 DE_Layer2_Pitch;
+u32 DE_Layer3_Ptr;
+u32 DE_Layer3_W;
+u32 DE_Layer3_H;
+u32 DE_Layer3_Pitch;
+
+/* HalDispSetLayerSel 写入 0x7400309C */
+u32 DE_LayerSel;
+/* HalDispSetPIP(1)→A0..AC，(2)→B0..BC：屏上目的矩形，与 68/80 字层成对（IDA HalDispSetPIP） */
+u16 DE_PipLayer1[4];
+u16 DE_PipLayer2[4];
+
+/* HalDispSetColorKey：每层 3×u16 写 DC/E0/E4、E8/EC/F0、F4/F8/FC；汇总控制字 0x74003100 */
+u16 DE_CKey1[3];
+u16 DE_CKey2[3];
+u16 DE_CKey3[3];
+u32 DE_ColorKeyCtrl;
+/* HalDispSetAlpha：a1=1..3 → 0x740030D0 + 4*(a1-1)，固件写 int16（IDA） */
+short DE_AlphaHw[3];
+
 void my_memcpy(void *dest, void *src, int len)
 {
     memcpy(dest, src, len);

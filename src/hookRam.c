@@ -7,6 +7,10 @@
  * hookRam.c：Guest 对 MMIO 的读写在 Unicorn 里走 UC_HOOK_MEM_READ/WRITE，由此回调模拟硬件。
  * 含 SPI、定时器、显示引擎 DE、FCIE(NAND/SD)、UART、中断控制器、触摸 AUXADC、GPT、MSDC 等。
  * 与 main.c 的 UC_HOOK_CODE 分工：代码钩子改执行流/寄存器，本文件只伪造寄存器值与 DMA 数据搬运。
+ *
+ * 显示多图层（IDA 8533n_7835.axf）：HalDispSetBufInfo（54/68/80）、HalDispSetPIP（A0/B0）、
+ * HalDispSetAlpha（0x740030D0+D4+D8）、HalDispSetColorKey（DC..FC + 0x74003100）。
+ * 全屏合成见 MORAL_DE_LAYER_COMPOSITE / MORAL_DE_BLEND_COLORKEY / MORAL_DE_BLEND_ALPHA。
  */
 
 bool hookInsnInvalid(uc_engine *uc, void *user_data);
@@ -280,14 +284,61 @@ static void de_blit_to_sdl(u16 dstX, u16 dstY, u16 w, u16 h, u32 cachePitch)
     de_blit_rgb565_to_surface(sfc, Lcd_Cache_Buffer, dstX, dstY, w, h, cachePitch);
 }
 
-/* 返回包含 srcBuf 的主帧缓冲基址；优先 DE 层寄存器，其次 0x74003040 登记的基址 */
+/* HalDispSetBufInfo：单层 Guest 缓冲在 MIU 中的跨度（字节），用于判断 src 落在哪一层 */
+static u32 de_layer_span_bytes(u32 pitch, u32 w, u32 h)
+{
+    u32 rowMin = w * DE_BPP;
+
+    if (w == 0u || h == 0u || pitch < rowMin || pitch >= 8192u)
+        return 0u;
+    if (w > 4096u || h > 4096u)
+        return 0u;
+    return (h - 1u) * pitch + w * DE_BPP;
+}
+
+static u32 de_row_pitch_for_layer_base(u32 base)
+{
+    u32 row = (u32)DE_PANEL_W * DE_BPP;
+
+    if (base == DE_Layer0_Ptr && DE_Layer0_Pitch >= row && DE_Layer0_Pitch < 8192u)
+        return DE_Layer0_Pitch;
+    if (base == DE_Layer2_Ptr && DE_Layer2_W > 0u)
+    {
+        u32 r2 = (u32)DE_Layer2_W * DE_BPP;
+        if (DE_Layer2_Pitch >= r2 && DE_Layer2_Pitch < 8192u)
+            return DE_Layer2_Pitch;
+    }
+    if (base == DE_Layer3_Ptr && DE_Layer3_W > 0u)
+    {
+        u32 r3 = (u32)DE_Layer3_W * DE_BPP;
+        if (DE_Layer3_Pitch >= r3 && DE_Layer3_Pitch < 8192u)
+            return DE_Layer3_Pitch;
+    }
+    if (base == Lcd_FullScreen_Ptr && DE_Layer0_Pitch >= row && DE_Layer0_Pitch < 8192u)
+        return DE_Layer0_Pitch;
+    return row;
+}
+
+/* 返回包含 srcBuf 的主帧缓冲基址；对齐 IDA HalDispSetBufInfo 多图层 54/68/80 */
 static u32 de_guest_fb_base_containing(u32 srcBuf)
 {
     u32 fbBytes = (u32)DE_PANEL_W * (u32)DE_PANEL_H * DE_BPP;
+    u32 span;
 
     if (DE_Layer0_Ptr >= 0x1000u && DE_Layer0_Ptr < 0x8000000u &&
         srcBuf >= DE_Layer0_Ptr && srcBuf < DE_Layer0_Ptr + fbBytes)
         return DE_Layer0_Ptr;
+
+    span = de_layer_span_bytes(DE_Layer2_Pitch, DE_Layer2_W, DE_Layer2_H);
+    if (span != 0u && DE_Layer2_Ptr >= 0x1000u && DE_Layer2_Ptr < 0x8000000u &&
+        srcBuf >= DE_Layer2_Ptr && srcBuf < DE_Layer2_Ptr + span)
+        return DE_Layer2_Ptr;
+
+    span = de_layer_span_bytes(DE_Layer3_Pitch, DE_Layer3_W, DE_Layer3_H);
+    if (span != 0u && DE_Layer3_Ptr >= 0x1000u && DE_Layer3_Ptr < 0x8000000u &&
+        srcBuf >= DE_Layer3_Ptr && srcBuf < DE_Layer3_Ptr + span)
+        return DE_Layer3_Ptr;
+
     if (Lcd_FullScreen_Ptr >= 0x1000u && Lcd_FullScreen_Ptr < 0x8000000u &&
         srcBuf >= Lcd_FullScreen_Ptr && srcBuf < Lcd_FullScreen_Ptr + fbBytes)
         return Lcd_FullScreen_Ptr;
@@ -303,9 +354,7 @@ static void de_resolve_blit_dest(u32 srcBuf, u16 *dstX, u16 *dstY)
     if (base != 0u)
     {
         u32 off = srcBuf - base;
-        u32 mainPitch = (u32)DE_PANEL_W * DE_BPP;
-        if (DE_Layer0_Pitch >= mainPitch && DE_Layer0_Pitch < 8192u)
-            mainPitch = DE_Layer0_Pitch;
+        u32 mainPitch = de_row_pitch_for_layer_base(base);
         u32 ty = off / mainPitch;
         u32 tx = (off % mainPitch) / DE_BPP;
         if (ty < DE_PANEL_H && tx < DE_PANEL_W)
@@ -345,6 +394,254 @@ static int de_read_fb(u32 srcAddr, u32 guestPitch, u16 w, u16 h)
     }
     return 0;
 }
+
+/* HalDispSetAlpha 写入值 → 0..255 不透明度（255=完全不透明）；无法解析时偏不透明减少花洞 */
+static unsigned de_alpha_u8_from_hw(short v)
+{
+    u16 u = (u16)(unsigned short)v;
+
+    if (v == 0)
+        return 255u;
+    if (u == 64u)
+        return 255u;
+    if ((u & 0xFFu) == 176u)
+    {
+        unsigned hi = (unsigned)(u >> 8) & 0xFFu;
+        return hi ? hi : 255u;
+    }
+    return 255u;
+}
+
+static u16 de_blend565_over(u16 s, u16 d, unsigned a)
+{
+    unsigned sr, sg, sb, dr, dg, db, inv;
+
+    if (a >= 255u)
+        return s;
+    if (a == 0u)
+        return d;
+    sr = (unsigned)(s >> 11) & 0x1Fu;
+    sg = (unsigned)(s >> 5) & 0x3Fu;
+    sb = (unsigned)s & 0x1Fu;
+    dr = (unsigned)(d >> 11) & 0x1Fu;
+    dg = (unsigned)(d >> 5) & 0x3Fu;
+    db = (unsigned)d & 0x1Fu;
+    inv = 255u - a;
+    sr = (sr * a + dr * inv + 127u) / 255u;
+    sg = (sg * a + dg * inv + 127u) / 255u;
+    sb = (sb * a + db * inv + 127u) / 255u;
+    if (sr > 0x1Fu)
+        sr = 0x1Fu;
+    if (sg > 0x3Fu)
+        sg = 0x3Fu;
+    if (sb > 0x1Fu)
+        sb = 0x1Fu;
+    return (u16)((sr << 11) | (sg << 5) | sb);
+}
+
+/* mask!=0 时 (px^ref)&mask==0 视为透明（与常见 RGB565 colorkey 一致） */
+static int de_ckey_skip_pixel(u16 px, const u16 ckey[3])
+{
+#if !MORAL_DE_BLEND_COLORKEY
+    (void)px;
+    (void)ckey;
+    return 0;
+#else
+    u16 m = ckey[1];
+
+    if (m == 0u)
+        return 0;
+    return ((px ^ ckey[0]) & m) == 0u;
+#endif
+}
+
+/*
+ * 子层 RGB565 按 PIP 压到 panel；可选色键/Alpha（HalDispSetColorKey / HalDispSetAlpha 镜像）。
+ * 对 W/H/PIP 做夹紧，避免寄存器垃圾值导致 uc_mem_read 越界花屏。
+ */
+static void de_merge_layer_rgb565_into(u8 *panel, u32 panelPitch, u32 srcAddr, u32 srcPitch, u16 srcW,
+                                       u16 srcH, const u16 pip[4], const u16 ckey[3], short alphaReg)
+{
+    u16 pipX = pip[0];
+    u16 pipY = pip[1];
+    u16 boxW = pip[2];
+    u16 boxH = pip[3];
+    u16 useW;
+    u16 useH;
+    u16 sw;
+    u16 sh;
+    u32 spanBytes;
+    u8 rowbuf[240 * 2];
+    unsigned alpha_u8;
+    int need_pixel_blend;
+    u16 yi;
+
+    if (srcAddr < 0x1000u || srcAddr >= 0x8000000u || srcW == 0 || srcH == 0)
+        return;
+
+    sw = srcW;
+    sh = srcH;
+    if (sw > 1024u)
+        sw = 1024u;
+    if (sh > 1024u)
+        sh = 1024u;
+
+    if (srcPitch < (u32)sw * DE_BPP)
+        srcPitch = (u32)sw * DE_BPP;
+
+    spanBytes = de_layer_span_bytes(srcPitch, sw, sh);
+    if (spanBytes == 0u)
+        spanBytes = srcPitch * (u32)sh;
+
+    if (pipX >= DE_PANEL_W || pipY >= DE_PANEL_H)
+        return;
+
+    useW = boxW;
+    useH = boxH;
+    if (boxW == 0u && boxH == 0u)
+    {
+        useW = sw > DE_PANEL_W ? (u16)DE_PANEL_W : sw;
+        useH = sh > DE_PANEL_H ? (u16)DE_PANEL_H : sh;
+        pipX = 0;
+        pipY = 0;
+    }
+    else
+    {
+        if (useW == 0u || useW > sw)
+            useW = sw;
+        if (useH == 0u || useH > sh)
+            useH = sh;
+        if (useW > DE_PANEL_W)
+            useW = (u16)DE_PANEL_W;
+        if (useH > DE_PANEL_H)
+            useH = (u16)DE_PANEL_H;
+    }
+
+#if MORAL_DE_BLEND_ALPHA
+    alpha_u8 = de_alpha_u8_from_hw(alphaReg);
+#else
+    alpha_u8 = 255u;
+#endif
+    need_pixel_blend = 0;
+#if MORAL_DE_BLEND_COLORKEY
+    if (ckey[1] != 0u)
+        need_pixel_blend = 1;
+#endif
+#if MORAL_DE_BLEND_ALPHA
+    if (alpha_u8 < 255u)
+        need_pixel_blend = 1;
+#endif
+
+    for (yi = 0; yi < useH; yi++)
+    {
+        u16 py = pipY + yi;
+        u16 lineCopy;
+        u32 rowOff = (u32)yi * srcPitch;
+
+        if (py >= DE_PANEL_H)
+            break;
+        if (pipX >= DE_PANEL_W)
+            continue;
+        if (rowOff >= spanBytes)
+            break;
+
+        lineCopy = useW;
+        if (lineCopy > sw)
+            lineCopy = sw;
+        if (spanBytes > rowOff)
+        {
+            u32 maxAtRow = (spanBytes - rowOff) / DE_BPP;
+
+            if (maxAtRow == 0u)
+                break;
+            if (lineCopy > maxAtRow)
+                lineCopy = (u16)maxAtRow;
+        }
+        else
+            break;
+
+        if (pipX + lineCopy > DE_PANEL_W)
+            lineCopy = (u16)(DE_PANEL_W - pipX);
+
+        if (uc_mem_read(MTK, srcAddr + rowOff, rowbuf, (u32)lineCopy * DE_BPP) != UC_ERR_OK)
+            continue;
+
+        if (!need_pixel_blend)
+        {
+            memcpy(panel + (u32)py * panelPitch + (u32)pipX * DE_BPP, rowbuf, (size_t)lineCopy * DE_BPP);
+            continue;
+        }
+
+        {
+            u16 xi;
+            u8 *pdst = panel + (u32)py * panelPitch + (u32)pipX * DE_BPP;
+
+            for (xi = 0; xi < lineCopy; xi++)
+            {
+                u16 s = (u16)((u16)rowbuf[(u32)xi * 2u] | ((u16)rowbuf[(u32)xi * 2u + 1u] << 8));
+                u16 d = (u16)((u16)pdst[(u32)xi * 2u] | ((u16)pdst[(u32)xi * 2u + 1u] << 8));
+                u16 out;
+
+                if (de_ckey_skip_pixel(s, ckey))
+                    continue;
+#if MORAL_DE_BLEND_ALPHA
+                out = de_blend565_over(s, d, alpha_u8);
+#else
+                out = s;
+#endif
+                pdst[(u32)xi * 2u] = (u8)(out & 0xFFu);
+                pdst[(u32)xi * 2u + 1u] = (u8)(out >> 8);
+            }
+        }
+    }
+}
+
+#if MORAL_DE_LAYER_COMPOSITE
+static int de_layer_geo_ok(u32 w, u32 h)
+{
+    return w >= 1u && w <= 1024u && h >= 1u && h <= 1024u;
+}
+
+static int de_multilayer_composite_needed(void)
+{
+    if (DE_Layer2_Ptr >= 0x1000u && de_layer_geo_ok(DE_Layer2_W, DE_Layer2_H))
+        return 1;
+    if (DE_Layer3_Ptr >= 0x1000u && de_layer_geo_ok(DE_Layer3_W, DE_Layer3_H))
+        return 1;
+    return 0;
+}
+
+static int de_read_fb_composite_into(u8 *dst, u32 dstCap)
+{
+    u32 row = (u32)DE_PANEL_W * DE_BPP;
+    u32 p0 = DE_Layer0_Pitch;
+
+    if (p0 < row || p0 >= 8192u)
+        p0 = row;
+    if (DE_Layer0_Ptr < 0x1000u || DE_Layer0_Ptr >= 0x8000000u)
+        return -1;
+    if ((u32)DE_PANEL_H * row > dstCap)
+        return -1;
+
+    if (de_read_fb(DE_Layer0_Ptr, p0, (u16)DE_PANEL_W, (u16)DE_PANEL_H) != 0)
+        return -1;
+    if (dst != Lcd_Cache_Buffer)
+        memcpy(dst, Lcd_Cache_Buffer, (size_t)DE_PANEL_H * row);
+
+    if (DE_Layer2_Ptr >= 0x1000u && de_layer_geo_ok(DE_Layer2_W, DE_Layer2_H))
+        de_merge_layer_rgb565_into(dst, row, DE_Layer2_Ptr, DE_Layer2_Pitch, (u16)DE_Layer2_W,
+                                   (u16)DE_Layer2_H, DE_PipLayer1, DE_CKey1, DE_AlphaHw[0]);
+    if (DE_Layer3_Ptr >= 0x1000u && de_layer_geo_ok(DE_Layer3_W, DE_Layer3_H))
+        de_merge_layer_rgb565_into(dst, row, DE_Layer3_Ptr, DE_Layer3_Pitch, (u16)DE_Layer3_W,
+                                   (u16)DE_Layer3_H, DE_PipLayer2, DE_CKey2, DE_AlphaHw[1]);
+    return 0;
+}
+
+static int de_read_fb_composite_full(void)
+{
+    return de_read_fb_composite_into(Lcd_Cache_Buffer, sizeof(Lcd_Cache_Buffer));
+}
+#endif /* MORAL_DE_LAYER_COMPOSITE */
 
 static u32 de_periodic_call_cnt = 0;
 
@@ -451,9 +748,7 @@ static void de_try_snapshot_fb_at_de_trigger(u32 srcBuf_in, u32 pitch_in, u16 w_
             if (expandBase != 0u)
             {
                 srcBuf = expandBase;
-                pitch = (u32)DE_PANEL_W * DE_BPP;
-                if (DE_Layer0_Pitch >= pitch && DE_Layer0_Pitch < 8192u)
-                    pitch = DE_Layer0_Pitch;
+                pitch = de_row_pitch_for_layer_base(expandBase);
                 w = (u16)DE_PANEL_W;
                 h = (u16)DE_PANEL_H;
             }
@@ -466,8 +761,25 @@ static void de_try_snapshot_fb_at_de_trigger(u32 srcBuf_in, u32 pitch_in, u16 w_
     if (pitch == 0u)
         pitch = (u32)w * DE_BPP;
 
+#if MORAL_DE_LAYER_COMPOSITE
+    {
+        int read_ok = 0;
+
+        if (!is_cursor && w >= DE_PANEL_W - 20u && h >= DE_PANEL_H - 80u && de_multilayer_composite_needed())
+        {
+            read_ok = (de_read_fb_composite_full() == 0);
+            if (!read_ok)
+                read_ok = (de_read_fb(srcBuf, pitch, w, h) == 0);
+        }
+        else
+            read_ok = (de_read_fb(srcBuf, pitch, w, h) == 0);
+        if (!read_ok)
+            return;
+    }
+#else
     if (de_read_fb(srcBuf, pitch, w, h) != 0)
         return;
+#endif
 
     if (!is_cursor && w >= DE_PANEL_W - 20u && h >= DE_PANEL_H - 80u)
     {
@@ -541,9 +853,7 @@ void de_emulator_flush_pending(void)
         if (expandBase != 0u)
         {
             srcBuf = expandBase;
-            pitch = (u32)DE_PANEL_W * DE_BPP;
-            if (DE_Layer0_Pitch >= pitch && DE_Layer0_Pitch < 8192u)
-                pitch = DE_Layer0_Pitch;
+            pitch = de_row_pitch_for_layer_base(expandBase);
             w = (u16)DE_PANEL_W;
             h = (u16)DE_PANEL_H;
         }
@@ -636,11 +946,21 @@ void de_emulator_periodic_refresh(void)
             }
         }
 
-        u32 pitch = DE_PANEL_W * DE_BPP;
+        {
+            int got = 0;
+#if MORAL_DE_LAYER_COMPOSITE
+            if (de_multilayer_composite_needed())
+                got = (de_read_fb_composite_into(Lcd_Periodic_Buffer, sizeof(Lcd_Periodic_Buffer)) == 0);
+#endif
+            if (!got)
+            {
+                u32 pitch = DE_PANEL_W * DE_BPP;
 
-        if (de_read_fb_to(Lcd_Periodic_Buffer, sizeof(Lcd_Periodic_Buffer),
-                          srcBuf, pitch, DE_PANEL_W, DE_PANEL_H) != 0)
-            return;
+                if (de_read_fb_to(Lcd_Periodic_Buffer, sizeof(Lcd_Periodic_Buffer),
+                                  srcBuf, pitch, DE_PANEL_W, DE_PANEL_H) != 0)
+                    return;
+            }
+        }
 
         de_blit_from(Lcd_Periodic_Buffer, 0, 0, DE_PANEL_W, DE_PANEL_H, DE_PANEL_W * DE_BPP);
         Lcd_Need_Update = 1;
@@ -688,9 +1008,7 @@ void de_emulator_service_guest_fb_pull(void)
                 if (expandBase != 0u)
                 {
                     srcBuf = expandBase;
-                    pitch = (u32)DE_PANEL_W * DE_BPP;
-                    if (DE_Layer0_Pitch >= pitch && DE_Layer0_Pitch < 8192u)
-                        pitch = DE_Layer0_Pitch;
+                    pitch = de_row_pitch_for_layer_base(expandBase);
                     w = (u16)DE_PANEL_W;
                     h = (u16)DE_PANEL_H;
                 }
@@ -787,8 +1105,15 @@ void de_emulator_service_guest_fb_pull(void)
         }
 
         pitch = DE_PANEL_W * DE_BPP;
-        if (de_read_fb(srcBuf, pitch, DE_PANEL_W, DE_PANEL_H) != 0)
-            return;
+        {
+            int got = 0;
+#if MORAL_DE_LAYER_COMPOSITE
+            if (de_multilayer_composite_needed())
+                got = (de_read_fb_composite_full() == 0);
+#endif
+            if (!got && de_read_fb(srcBuf, pitch, DE_PANEL_W, DE_PANEL_H) != 0)
+                return;
+        }
 
         s_lcd_host_blit_dstX = 0;
         s_lcd_host_blit_dstY = 0;
@@ -945,6 +1270,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         {
             static u32 layer_sel_cnt = 0;
             layer_sel_cnt++;
+            DE_LayerSel = (u32)value;
             if (MORAL_LOG_HOT_PATH && (layer_sel_cnt <= 10 || (layer_sel_cnt % 500) == 0))
                 printf("[lcd]layer_sel[%x] #%u\n", (u32)value, layer_sel_cnt);
         }
@@ -990,6 +1316,142 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     case 0x74003064:
         if (type == UC_MEM_WRITE)
             DE_Layer0_Pitch = value;
+        break;
+    case 0x74003068:
+        if (type == UC_MEM_WRITE)
+        {
+            DE_Layer2_Ptr &= 0xffff0000u;
+            DE_Layer2_Ptr |= ((u32)value & 0xffffu);
+        }
+        break;
+    case 0x7400306C:
+        if (type == UC_MEM_WRITE)
+        {
+            DE_Layer2_Ptr &= 0x0000ffffu;
+            DE_Layer2_Ptr |= (((u32)value & 0xffffu) << 16);
+        }
+        break;
+    case 0x74003070:
+        if (type == UC_MEM_WRITE)
+            DE_Layer2_W = (u32)value;
+        break;
+    case 0x74003074:
+        if (type == UC_MEM_WRITE)
+            DE_Layer2_H = (u32)value;
+        break;
+    case 0x74003078:
+        if (type == UC_MEM_WRITE)
+            DE_Layer2_Pitch = (u32)value;
+        break;
+    case 0x74003080:
+        if (type == UC_MEM_WRITE)
+        {
+            DE_Layer3_Ptr &= 0xffff0000u;
+            DE_Layer3_Ptr |= ((u32)value & 0xffffu);
+        }
+        break;
+    case 0x74003084:
+        if (type == UC_MEM_WRITE)
+        {
+            DE_Layer3_Ptr &= 0x0000ffffu;
+            DE_Layer3_Ptr |= (((u32)value & 0xffffu) << 16);
+        }
+        break;
+    case 0x74003088:
+        if (type == UC_MEM_WRITE)
+            DE_Layer3_W = (u32)value;
+        break;
+    case 0x7400308C:
+        if (type == UC_MEM_WRITE)
+            DE_Layer3_H = (u32)value;
+        break;
+    case 0x74003090:
+        if (type == UC_MEM_WRITE)
+            DE_Layer3_Pitch = (u32)value;
+        break;
+    case 0x740030D0:
+        if (type == UC_MEM_WRITE)
+            DE_AlphaHw[0] = (short)((u32)value & 0xFFFFu);
+        break;
+    case 0x740030D4:
+        if (type == UC_MEM_WRITE)
+            DE_AlphaHw[1] = (short)((u32)value & 0xFFFFu);
+        break;
+    case 0x740030D8:
+        if (type == UC_MEM_WRITE)
+            DE_AlphaHw[2] = (short)((u32)value & 0xFFFFu);
+        break;
+    case 0x740030DC:
+        if (type == UC_MEM_WRITE)
+            DE_CKey1[0] = (u16)(u32)value;
+        break;
+    case 0x740030E0:
+        if (type == UC_MEM_WRITE)
+            DE_CKey1[1] = (u16)(u32)value;
+        break;
+    case 0x740030E4:
+        if (type == UC_MEM_WRITE)
+            DE_CKey1[2] = (u16)(u32)value;
+        break;
+    case 0x740030E8:
+        if (type == UC_MEM_WRITE)
+            DE_CKey2[0] = (u16)(u32)value;
+        break;
+    case 0x740030EC:
+        if (type == UC_MEM_WRITE)
+            DE_CKey2[1] = (u16)(u32)value;
+        break;
+    case 0x740030F0:
+        if (type == UC_MEM_WRITE)
+            DE_CKey2[2] = (u16)(u32)value;
+        break;
+    case 0x740030F4:
+        if (type == UC_MEM_WRITE)
+            DE_CKey3[0] = (u16)(u32)value;
+        break;
+    case 0x740030F8:
+        if (type == UC_MEM_WRITE)
+            DE_CKey3[1] = (u16)(u32)value;
+        break;
+    case 0x740030FC:
+        if (type == UC_MEM_WRITE)
+            DE_CKey3[2] = (u16)(u32)value;
+        break;
+    case 0x74003100:
+        if (type == UC_MEM_WRITE)
+            DE_ColorKeyCtrl = (u32)value;
+        break;
+    case 0x740030A0:
+        if (type == UC_MEM_WRITE)
+            DE_PipLayer1[0] = (u16)(u32)value;
+        break;
+    case 0x740030A4:
+        if (type == UC_MEM_WRITE)
+            DE_PipLayer1[1] = (u16)(u32)value;
+        break;
+    case 0x740030A8:
+        if (type == UC_MEM_WRITE)
+            DE_PipLayer1[2] = (u16)(u32)value;
+        break;
+    case 0x740030AC:
+        if (type == UC_MEM_WRITE)
+            DE_PipLayer1[3] = (u16)(u32)value;
+        break;
+    case 0x740030B0:
+        if (type == UC_MEM_WRITE)
+            DE_PipLayer2[0] = (u16)(u32)value;
+        break;
+    case 0x740030B4:
+        if (type == UC_MEM_WRITE)
+            DE_PipLayer2[1] = (u16)(u32)value;
+        break;
+    case 0x740030B8:
+        if (type == UC_MEM_WRITE)
+            DE_PipLayer2[2] = (u16)(u32)value;
+        break;
+    case 0x740030BC:
+        if (type == UC_MEM_WRITE)
+            DE_PipLayer2[3] = (u16)(u32)value;
         break;
     case 0x7400313C:
         if (type == UC_MEM_WRITE)
