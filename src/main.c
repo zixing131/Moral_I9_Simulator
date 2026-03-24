@@ -1514,20 +1514,11 @@ void RunArmProgram(void *startAddr)
 
     uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
 
-    /*
-     * 旧逻辑每轮都固定用 100ms/200K 指令时间片，并且无条件读 CPSR、处理事件；
-     * 在「没有待处理事件」时这会产生不必要的 stop/start 与寄存器往返开销。
-     *
-     * 改为自适应策略：
-     * 1. 有待处理事件时，用较短时间片，尽快回到宿主侧投递 IRQ/VM 事件。
-     * 2. 空闲时放大时间片，减少 uc_emu_start 切换频率。
-     * 3. 只有确实存在待处理事件时才进入 handleVmEvent_EMU。
-     */
     for (;;)
     {
-        int has_pending = moral_vm_has_pending_events();
-        uint64_t timeout_us = has_pending ? 2000u : 20000u;
-        uint64_t instr_count = has_pending ? 20000u : 400000u;
+        int pending_before = moral_vm_has_pending_events();
+        uint64_t timeout_us = pending_before ? 2000u : 100000u;
+        uint64_t instr_count = pending_before ? 20000u : 400000u;
         uint64_t start_pc = (uint64_t)(pc & ~1u);
         if (cpsr & 0x20)
             start_pc |= 1;
@@ -1539,7 +1530,7 @@ void RunArmProgram(void *startAddr)
         if (p != UC_ERR_OK)
             break;
 
-        if (has_pending || moral_vm_has_pending_events())
+        if (pending_before || moral_vm_has_pending_events())
         {
             handleVmEvent_EMU((uint64_t)pc);
             uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
