@@ -1616,47 +1616,8 @@ int main(int argc, char *args[])
         u8 *tmp = 0;
         tmp = readFile(ROM_PROGRAM_BIN, &size);
         moral_uc_write_low_and_xram(tmp, size);
-        SDL_free(tmp);
-
-        // // 每隔512字节进行一次检查
-        // u8 *p = tmp;
-        // int sector = 0;
-        // while (1)
-        // {
-        //     int *q = p;
-        //     int sum = *q;
-        //     int check = nand_checksum(p + 4, 508);
-        //     printf("check sector[%d] sum[%x] =? check[%x]\n", sector, sum, check);
-        //     sector++;
-        //     p += 512;
-        //     if (sector > 1)
-        //         break;
-        // }
-
-        // 设置nandflash的类型为0x4e00处的
-        // tmp = readFile("Rom\\NANDINFO_v2.nni", &size);
-        // my_memcpy(nandFlashData, tmp + 0x400, 0x200);
-        // SDL_free(tmp);
-
-        // // 读取PARTITION_INFO列表
-        // tmp = readFile("Rom\\PARTITION_v2.pni", &size);
-        // my_memcpy(nandFlashData + 0x800, tmp, 0x400);
-        // SDL_free(tmp);
-
-        // // 读取prt文件
-        // tmp = readFile("Rom\\8533n_7835.prt", &size);
-        // my_memcpy(nandFlashData + 0x4280 * 0x800, tmp, size);
-        // SDL_free(tmp);
-
-        // 读取FAT文件系统
-        // tmp = readFile("Rom\\FatImage.fat", &size);
-        // my_memcpy(nandFlashData + 0x42c0 * 0x800, tmp, size);
-        // SDL_free(tmp);
-
-        // 尝试完整固件
-        // tmp = readFile("Rom\\TELEGO_T98_MSTAR.bin", &size);
-        // moral-i9.bin
-        // tmp = readFile("Rom\\hx555.bin", &size);
+        SDL_free(tmp); 
+        
         tmp = readFile("Rom\\moral-i9.bin", &size);
         my_memcpy(NandFlashCard, tmp, size);
         SDL_free(tmp);
@@ -2050,9 +2011,31 @@ static const char *moral_copy_one_printf_spec(const char *fp, char *mini, size_t
     return fp;
 }
 
+/* 统计 mini 里「宽度 / 精度」各用了几个 '*'（%*s、%.*s、%*.*s） */
+static void moral_mini_star_layout(const char *mini, int *width_stars, int *prec_stars)
+{
+    const char *p;
+    int dot = 0;
+
+    *width_stars = 0;
+    *prec_stars = 0;
+    for (p = mini + 1; *p != '\0'; p++)
+    {
+        if (*p == '.')
+            dot = 1;
+        else if (*p == '*')
+        {
+            if (!dot)
+                (*width_stars)++;
+            else
+                (*prec_stars)++;
+        }
+    }
+}
+
 /*
  * 按格式串从 Guest 的 ap 依次取参并拼成一行（与 OEMOS_dbgprintf→vsprintf 用法一致）。
- * 不支持 %*n 动态宽度、%n；遇 * 则输出占位说明。
+ * 支持常见 %*s / %*d、%.*s、%*.*s；不支持 %n；其余含 * 仍占位且不取参（可能错位）。
  */
 static void moral_vsprintf_guest_format_line(u32 fmt_gva, u32 va_list_gva, char *out, size_t out_sz)
 {
@@ -2120,21 +2103,97 @@ static void moral_vsprintf_guest_format_line(u32 fmt_gva, u32 va_list_gva, char 
         if (mini[0] != '%')
             break;
 
-        if (strchr(mini, '*') != NULL)
-        {
-            int n = snprintf(frag, sizeof(frag), "<*spec:%s>", mini);
-            if (n > 0 && (size_t)n < rem)
-            {
-                memcpy(op, frag, (size_t)n);
-                op += n;
-                rem -= (size_t)n;
-            }
-            continue;
-        }
-
         {
             char tc = mini[strlen(mini) - 1u];
             int n = -1;
+            int w_star = 0, p_star = 0;
+
+            if (strchr(mini, '*') != NULL)
+                moral_mini_star_layout(mini, &w_star, &p_star);
+
+            if (w_star != 0 || p_star != 0)
+            {
+                int w = 0, prec = 0;
+                u32 uw = 0, up = 0;
+
+                if (w_star > 1 || p_star > 1 ||
+                    (w_star && p_star && tc != 's' && tc != 'd' && tc != 'i' && tc != 'u' && tc != 'x' &&
+                     tc != 'X' && tc != 'o' && tc != 'p'))
+                {
+                    n = snprintf(frag, sizeof(frag), "<*spec:%s>", mini);
+                }
+                else
+                {
+                    if (w_star)
+                    {
+                        if (moral_ap_pull_u32(&ap, &uw) != 0)
+                            n = snprintf(frag, sizeof(frag), "<* pull w err>");
+                        else
+                            w = (int)(int32_t)uw;
+                    }
+                    if (n < 0 && p_star)
+                    {
+                        if (moral_ap_pull_u32(&ap, &up) != 0)
+                            n = snprintf(frag, sizeof(frag), "<* pull p err>");
+                        else
+                            prec = (int)(int32_t)up;
+                    }
+                    if (n < 0 && tc == 's')
+                    {
+                        u32 p = 0;
+                        if (moral_ap_pull_u32(&ap, &p) != 0)
+                            n = snprintf(frag, sizeof(frag), "<*s pull ptr err>");
+                        else
+                        {
+                            moral_guest_read_cstr_short(p, gstr, sizeof(gstr));
+                            if (w_star && p_star)
+                                n = snprintf(frag, sizeof(frag), "%*.*s", w, prec, gstr);
+                            else if (w_star)
+                                n = snprintf(frag, sizeof(frag), "%*s", w, gstr);
+                            else
+                                n = snprintf(frag, sizeof(frag), "%.*s", prec, gstr);
+                        }
+                    }
+                    else if (n < 0 && (tc == 'd' || tc == 'i'))
+                    {
+                        u32 v = 0;
+                        if (moral_ap_pull_u32(&ap, &v) != 0)
+                            n = snprintf(frag, sizeof(frag), "<*di pull err>");
+                        else
+                        {
+                            if (w_star && p_star)
+                                n = snprintf(frag, sizeof(frag), "%*.*d", w, prec, (int)(int32_t)v);
+                            else if (w_star)
+                                n = snprintf(frag, sizeof(frag), "%*d", w, (int)(int32_t)v);
+                            else
+                                n = snprintf(frag, sizeof(frag), "%.*d", prec, (int)(int32_t)v);
+                        }
+                    }
+                    else if (n < 0 &&
+                             (tc == 'u' || tc == 'x' || tc == 'X' || tc == 'o' || tc == 'p'))
+                    {
+                        u32 v = 0;
+                        if (moral_ap_pull_u32(&ap, &v) != 0)
+                            n = snprintf(frag, sizeof(frag), "<*ux pull err>");
+                        else if (w_star && p_star)
+                            n = snprintf(frag, sizeof(frag), mini, w, prec, (unsigned)v);
+                        else if (w_star)
+                            n = snprintf(frag, sizeof(frag), mini, w, (unsigned)v);
+                        else
+                            n = snprintf(frag, sizeof(frag), mini, prec, (unsigned)v);
+                    }
+                    else if (n < 0)
+                        n = snprintf(frag, sizeof(frag), "<*spec:%s>", mini);
+                }
+
+                if (n > 0 && (size_t)n < rem)
+                {
+                    memcpy(op, frag, (size_t)n);
+                    op += (size_t)n;
+                    rem -= (size_t)n;
+                }
+                continue;
+            }
 
             if (tc == 'n')
             {
