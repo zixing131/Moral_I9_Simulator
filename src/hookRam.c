@@ -2126,9 +2126,16 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 {
                     int cmd7 = nandFlashCMDData[7];
 
-                    if (act == 0xb0988001)
+                    if (act == 0xb0988001 || act == 0x80014800u)
                     {
-                        u16 pageCnt = nandFlashCMDData[7] + 1;
+                        /* 0xb0988001: 标准多页读（CMD[5]=0xb098, CMD[4]=0x8001）
+                         * 0x80014800: 变体多页读（CMD[5]=0x8001, CMD[4]=0x4800），
+                         *   pageCnt 优先取 CMD[8]+1，CMD[8]==0 时退回 CMD[7]+1。 */
+                        u16 pageCnt;
+                        if (act == 0x80014800u && nandFlashCMDData[8] != 0)
+                            pageCnt = (u16)(nandFlashCMDData[8] + 1);
+                        else
+                            pageCnt = (u16)(nandFlashCMDData[7] + 1);
                         for (u32 cnt = 0; cnt < pageCnt; cnt++)
                         {
                             u32 phyIdx = PhyRowIdx + cnt;
@@ -2354,6 +2361,14 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 SD_CMD_RSP_Buff[0] = 0xdede0000;
                 SD_CMD_RSP_Buff[1] = 0xdede0900;
             }
+            else if (p[0] == 0x01020304u && p[1] == 0x05060708u)
+            {
+                /* CMD3 响应数据被固件作为下一条命令写回（无 0xdede 前缀未被保护）；
+                 * 此处静默忽略，返回 READY/TRAN，避免固件误判卡初始化失败。 */
+                SD_CMD_RSP_Buff[0] = 0xdede0000;
+                SD_CMD_RSP_Buff[1] = 0xdede0900;
+                SD_CMD_RSP_Buff[2] = 0xdede005a;
+            }
             else
             {
                 static u32 sd_fcie_unknown;
@@ -2362,8 +2377,9 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                     sd_fcie_unknown++;
                     printf("[SD-FCIE] unhandled p0=0x%x p1=0x%x p2=0x%x\n", p[0], p[1], p[2]);
                 }
+                /* 返回 TRAN/READY 而非 IDLE，避免固件因未知命令误判卡失效 */
                 SD_CMD_RSP_Buff[0] = 0xdede0000;
-                SD_CMD_RSP_Buff[1] = 0xdede0100;
+                SD_CMD_RSP_Buff[1] = 0xdede0900;
                 SD_CMD_RSP_Buff[2] = 0xdede005a;
             }
 
