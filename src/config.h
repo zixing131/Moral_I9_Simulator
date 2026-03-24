@@ -181,6 +181,48 @@
 #define MORAL_SD_WRITE_FLUSH_EVERY 16
 #endif
 
+/*
+ * CBFS / vmio：drive 2、4 时固件走 /NAND/ 或 /CARD/ + ven_file_wfopen。
+ * 将此类打开重定向到宿主机目录（与 moral-i9.bin 并列，便于放入 .system 资源）。
+ * 地址来自 IDA（vmio.c）：若换固件需重对符号。
+ */
+#ifndef MORAL_CBFS_HOST_ENABLE
+#define MORAL_CBFS_HOST_ENABLE 1
+#endif
+#ifndef MORAL_CBFS_VM_FILE_OPEN_PC
+#define MORAL_CBFS_VM_FILE_OPEN_PC 0x004E04CCu
+#endif
+#ifndef MORAL_CBFS_VM_FILE_CLOSE_PC
+#define MORAL_CBFS_VM_FILE_CLOSE_PC 0x004E05AAu
+#endif
+#ifndef MORAL_CBFS_VM_FILE_READ_PC
+#define MORAL_CBFS_VM_FILE_READ_PC 0x004E083Eu
+#endif
+#ifndef MORAL_CBFS_VM_FILE_WRITE_PC
+#define MORAL_CBFS_VM_FILE_WRITE_PC 0x004E08C2u
+#endif
+#ifndef MORAL_CBFS_VM_FILE_SEEK_PC
+#define MORAL_CBFS_VM_FILE_SEEK_PC 0x004E0944u
+#endif
+#ifndef MORAL_CBFS_VM_FILE_TELL_PC
+#define MORAL_CBFS_VM_FILE_TELL_PC 0x004E0976u
+#endif
+#ifndef MORAL_CBFS_VM_FILE_GETSIZE_PC
+#define MORAL_CBFS_VM_FILE_GETSIZE_PC 0x004E0996u
+#endif
+#ifndef MORAL_CBFS_FILE_POOL_GVA
+#define MORAL_CBFS_FILE_POOL_GVA 0x00EF84B0u
+#endif
+#ifndef MORAL_CBFS_CURR_RUN_DEV_GVA
+#define MORAL_CBFS_CURR_RUN_DEV_GVA 0x00D1BE34u /* CurrRunDevType DCB */
+#endif
+#ifndef MORAL_CBFS_HOST_SUBDIR_NAND
+#define MORAL_CBFS_HOST_SUBDIR_NAND "NAND\\"
+#endif
+#ifndef MORAL_CBFS_HOST_SUBDIR_CARD
+#define MORAL_CBFS_HOST_SUBDIR_CARD "CARD\\"
+#endif
+
 #define EXT_RAM_ADDRESS 0x0000000
 
 #define INT_RAM_ADDRESS 0x40000000

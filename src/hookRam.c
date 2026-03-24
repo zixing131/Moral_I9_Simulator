@@ -60,6 +60,14 @@ static u8 nand_nc_try_decode_sector_offset(u32 sectorInPage, u32 *firstSector)
         return 1;
     }
 
+    /* 4..2047：固件常传页内字节偏移（非 sector 序号） */
+    if (sectorInPage >= 4u && sectorInPage < 2048u)
+    {
+        *firstSector = sectorInPage / 512u;
+        if (*firstSector < 4u)
+            return 1;
+    }
+
     if ((sectorInPage % 512u) == 0u)
     {
         u32 sectorIdx = sectorInPage / 512u;
@@ -126,6 +134,10 @@ u32 halTimerCntMax = 0;
 u32 DrvTimerStdaTimerGetTick = 0;
 
 u8 de_small_pending = 0;
+
+/* 开机动画 boot descriptor 误判：限制跳过次数，HalDispReset 时清零 */
+static u32 g_de_boot_desc_mark_buf;
+static u8 g_de_boot_desc_skip_consumed;
 
 static uint64_t cursor_de_last_draw = 0;
 
@@ -931,6 +943,25 @@ static void de_try_snapshot_fb_at_de_trigger(u32 srcBuf_in, u32 pitch_in, u16 w_
                 dstY = (u16)updateY;
             }
         }
+        else
+        {
+            /* 近全屏但无法从 Lcd_Update 反推 frameBase：勿用脏区指针 + 整屏 W×H 读 */
+            u32 expandBase = de_guest_fb_base_containing(srcBuf_in);
+            if (expandBase != 0u)
+            {
+                srcBuf = expandBase;
+                pitch = de_guest_pitch_for_full_panel_read(expandBase);
+                w = (u16)DE_PANEL_W;
+                h = (u16)DE_PANEL_H;
+            }
+            else
+            {
+                dstX = (u16)updateX;
+                dstY = (u16)updateY;
+                w = w_in;
+                h = h_in;
+            }
+        }
     }
 
     if (srcBuf < 0x1000u || srcBuf >= 0x8000000u || w == 0 || h == 0)
@@ -1703,7 +1734,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                         ? DE_Layer0_Pitch : (u32)w * DE_BPP;
 
             static u32 de_trigger_cnt = 0;
-            static u32 boot_desc_buf = 0;
             de_trigger_cnt++;
 
             /* srcBuf 无效时直接发 IRQ 跳过，不读 Guest 内存 */
@@ -1716,9 +1746,14 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             }
 
             if (de_trigger_cnt == 1 && w >= DE_PANEL_W && h >= DE_PANEL_H)
-                boot_desc_buf = srcBuf;
+                g_de_boot_desc_mark_buf = srcBuf;
 
-            if (srcBuf == boot_desc_buf && w >= DE_PANEL_W && h >= DE_PANEL_H)
+            /*
+             * 开机动画阶段可能把「boot descriptor」误当作 Layer0 指针提交；probe 误判会反复跳过 → 黑屏。
+             * 同一轮开机最多跳过 1 次；真指针与 RGB565 像素可能落在同一数值区间，避免永久 gate。
+             */
+            if (srcBuf == g_de_boot_desc_mark_buf && w >= DE_PANEL_W && h >= DE_PANEL_H &&
+                !g_de_boot_desc_skip_consumed)
             {
                 u8 probe[8];
                 if (uc_mem_read(MTK, srcBuf, probe, 8) == UC_ERR_OK)
@@ -1726,13 +1761,14 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                     u32 w1 = *(u32 *)(probe + 4);
                     if (w1 >= 0xD0000u && w1 < 0x2000000u)
                     {
+                        g_de_boot_desc_skip_consumed = 1;
                         tmp = 0xF00;
                         uc_mem_write(MTK, 0x74003148u, &tmp, 4);
                         lcd_irq_enqueue_throttled();
                         break;
                     }
                     else
-                        boot_desc_buf = 0;
+                        g_de_boot_desc_mark_buf = 0;
                 }
             }
 
@@ -1774,6 +1810,8 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                            is_reset ? "(HalDispReset)" : "(SWFMark)");
                 if (is_reset)
                 {
+                    g_de_boot_desc_skip_consumed = 0;
+                    g_de_boot_desc_mark_buf = 0;
                     /* HalDispReset：清所有 PIP 子层镜像，避免旧寄存器在下一帧被误合成。
                      * Layer0 (OP 主层) 由下一次 HalDispSetBufInfo(0,...) 覆盖，此处不清除。 */
                     DE_Layer1_Ptr = 0; DE_Layer1_W = 0; DE_Layer1_H = 0; DE_Layer1_Pitch = 0;
@@ -2021,12 +2059,14 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                             else
                             {
                                 static u32 nand_sec_fb_log;
-                                if (nand_sec_fb_log < 24u)
+                                if (nand_sec_fb_log < 8u)
                                 {
                                     nand_sec_fb_log++;
-                                    printf("[nand] unresolved cmd20 read act88988001 param=0x%x SectorInPage=0x%x phy=%u\n",
+                                    printf("[nand] fallback full page read act88988001 param=0x%x SectorInPage=0x%x phy=%u\n",
                                            nandParamSect, SectorInPage, PhyRowIdx);
                                 }
+                                /* CBFS/FTL 可能使用未建模的 param 编码；整页读提高与真机 NAND 转储的兼容性 */
+                                nand_nc_read_page_sectors_contig(p, nandDmaBuffPtr, 0, 4);
                             }
                         }
                     }

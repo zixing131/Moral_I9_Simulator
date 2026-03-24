@@ -2,7 +2,12 @@
 #define GDI_LAYER_DEBUG_
 
 #include "main.h"
+
+u32 g_nand_flash_image_bytes;
+
 #include "hookRam.c"
+#include "cbfs_host.h"
+#include "cbfs_host.c"
 
 #include "myui.c"
 #include "msdc.c"
@@ -1485,6 +1490,15 @@ void initMtkSimalator()
             {0x3B5C54, 0x3B5C55},     /* KER error */
             {0x7C322C, 0x7C3238},     /* skip mrc instructions */
             {0xEE9DC, 0xEE9DD},       /* LDRH R1,[R1,#34] @ hwll1_ReadE2pParameters → UC_ERR_EXCEPTION */
+#if MORAL_CBFS_HOST_ENABLE
+            {MORAL_CBFS_VM_FILE_OPEN_PC, MORAL_CBFS_VM_FILE_OPEN_PC + 1u},
+            {MORAL_CBFS_VM_FILE_CLOSE_PC, MORAL_CBFS_VM_FILE_CLOSE_PC + 1u},
+            {MORAL_CBFS_VM_FILE_READ_PC, MORAL_CBFS_VM_FILE_READ_PC + 1u},
+            {MORAL_CBFS_VM_FILE_WRITE_PC, MORAL_CBFS_VM_FILE_WRITE_PC + 1u},
+            {MORAL_CBFS_VM_FILE_SEEK_PC, MORAL_CBFS_VM_FILE_SEEK_PC + 1u},
+            {MORAL_CBFS_VM_FILE_TELL_PC, MORAL_CBFS_VM_FILE_TELL_PC + 1u},
+            {MORAL_CBFS_VM_FILE_GETSIZE_PC, MORAL_CBFS_VM_FILE_GETSIZE_PC + 1u},
+#endif
         };
         for (u32 ri = 0; ri < sizeof(hook_ranges) / sizeof(hook_ranges[0]); ri++)
         {
@@ -1746,9 +1760,40 @@ int main(int argc, char *args[])
         moral_uc_write_low_and_xram(tmp, size);
         SDL_free(tmp); 
 
-        tmp = readFile("Rom\\moral-i9.bin", &size);
-        my_memcpy(NandFlashCard, tmp, size);
-        SDL_free(tmp);
+        {
+            const char *nand_path_try[] = {
+                "Rom\\moral-i9.bin",
+                "bin\\Rom\\moral-i9.bin",
+                "Rom\\flash.img",
+                "bin\\Rom\\flash.img",
+            };
+            u32 ni;
+            tmp = NULL;
+            for (ni = 0; ni < sizeof(nand_path_try) / sizeof(nand_path_try[0]); ni++)
+            {
+                tmp = readFile(nand_path_try[ni], &size);
+                if (tmp != NULL)
+                {
+                    u32 ncopy = size;
+                    if (ncopy > sizeof(NandFlashCard))
+                        ncopy = (u32)sizeof(NandFlashCard);
+                    my_memcpy(NandFlashCard, tmp, ncopy);
+                    if (ncopy < sizeof(NandFlashCard))
+                        my_memset(NandFlashCard + ncopy, 0xFF, sizeof(NandFlashCard) - ncopy);
+                    g_nand_flash_image_bytes = ncopy;
+                    printf("[NAND] 已加载 %s (%u 字节，拷入 %u)\n", nand_path_try[ni], size, ncopy);
+                    SDL_free(tmp);
+                    tmp = NULL;
+                    break;
+                }
+            }
+            if (ni >= sizeof(nand_path_try) / sizeof(nand_path_try[0]))
+            {
+                printf("[NAND] 未找到 NAND 镜像（moral-i9.bin / flash.img）；CBFS(.system/...) 资源将无法读取\n");
+                g_nand_flash_image_bytes = 0;
+                my_memset(NandFlashCard, 0xFF, sizeof(NandFlashCard));
+            }
+        }
 
         uc_mem_read(MTK, 0x34, &Interrupt_Handler_Entry, 4);
         printf("中断处理函数入口地址:%x\n", Interrupt_Handler_Entry);
@@ -2610,6 +2655,11 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp2);
         uc_reg_write(MTK, UC_ARM_REG_PC, &tmp2);
     }
+
+#if MORAL_CBFS_HOST_ENABLE
+    if (moral_cbfs_host_dispatch((u32)address))
+        return;
+#endif
 
     switch (address)
     {

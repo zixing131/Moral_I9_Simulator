@@ -170,6 +170,8 @@ typedef struct _nandPage2048
 } nandPage2048;
 // 256MB
 u8 NandFlashCard[1024 * 1024 * 256];
+/* moral-i9.bin / flash 实际拷入长度；0 表示未加载。供 CBFS 在镜像内按路径/头扫描 */
+extern u32 g_nand_flash_image_bytes;
 // 预留32kb空间，防止连续page读写出错
 u32 nandSpareBuff[1024 * 32];
 
