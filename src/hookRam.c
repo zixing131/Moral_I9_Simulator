@@ -872,8 +872,12 @@ static void de_try_snapshot_fb_at_de_trigger(u32 srcBuf_in, u32 pitch_in, u16 w_
         /*
          * 利用 Lcd_Update_X/Y（SWI 0xc166）推算帧缓冲基址，
          * 然后扩展为整屏读（把整帧拷到 Lcd_Cache_Buffer，保持 SDL 内容完整）。
+         *
+         * IDA HalDispSetLayerBuffer：RGB565 下 srcX 向下取偶对齐（v10 = 2*(srcX>>1)），
+         * 再用对齐后的值算 offset = srcY * pitch + BPP * aligned_srcX。
+         * Lcd_Update_X 是对齐前的原始值，这里做同样的对齐。
          */
-        u32 updateX = Lcd_Update_X;
+        u32 updateX = Lcd_Update_X & ~1u;  /* RGB565 偶数像素对齐，与 IDA 一致 */
         u32 updateY = Lcd_Update_Y;
         u32 byteOff = updateY * pitch + updateX * DE_BPP;
 
@@ -1744,32 +1748,10 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                        Lcd_FullScreen_Ptr, Lcd_FullScreen_Ptr2);
             }
 
-            u8 is_cursor_de = (w <= 20u && h <= 20u);
-
-            if (is_cursor_de)
-            {
-                uint64_t now = moral_get_ticks_ms();
-                uint64_t min_interval = 1000 / 60;
-                if (min_interval < 1)
-                    min_interval = 1;
-
-                if (cursor_de_last_draw == 0 ||
-                    (now - cursor_de_last_draw) >= min_interval)
-                {
-                    cursor_de_last_draw = now;
-                    de_try_snapshot_fb_at_de_trigger(srcBuf, pitch, w, h, 1);
-                }
-
-                tmp = 0xF00;
-                uc_mem_write(MTK, 0x74003148u, &tmp, 4);
-            }
-            else
-            {
-                de_try_snapshot_fb_at_de_trigger(srcBuf, pitch, w, h, 0);
-                tmp = 0xF00;
-                uc_mem_write(MTK, 0x74003148u, &tmp, 4);
-                lcd_irq_enqueue_throttled();
-            }
+            de_try_snapshot_fb_at_de_trigger(srcBuf, pitch, w, h, 0);
+            tmp = 0xF00;
+            uc_mem_write(MTK, 0x74003148u, &tmp, 4);
+            lcd_irq_enqueue_throttled();
         }
         break;
     case 0x74003140:
