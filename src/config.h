@@ -2,10 +2,7 @@
 #define Timer_Interrupt_Duration 1000
 // SD卡镜像文件配置
 #define SD_CARD_IMG_PATH "Rom\\fat32.img"
-// Rom Flash文件配置
-#define FLASH_IMG_PATH "Rom\\flash.img"
-// Rom Flash Temp文件配置
-#define FLASH_IMG_TEMP_PATH "Rom\\flash.img.tmp"
+
 // 系统固件文件
 #define ROM_PROGRAM_BIN "Rom\\output.bin"
 
@@ -19,6 +16,19 @@
 #define GUEST_IDA_XRAM_BASE       0x00D00000u
 #define GUEST_IDA_XRAM_SIZE       0x00300000u /* 含 IDA XRAM 与原 16MB 映像尾 [0xD00000,0x1000000) */
 #define GUEST_LOW_IMAGE_MAP_SIZE  0x00D00000u
+
+/*
+ * IDA「Program Segmentation」与本工程 Guest 映射对应关系（本固件）：
+ *  - 0x00000000 .. ~0x00F41E58：ROM / CUST_* / XRAM / RAM_JAVA / DEBUG_AREA 等
+ *      → loadRom 写入 [0, GUEST_LOW_IMAGE_MAP_SIZE) + [GUEST_IDA_XRAM_BASE, +GUEST_IDA_XRAM_SIZE)
+ *  - IRAM_SECTION0 .. IRAM_RF_SECTION：0x08000000 .. 0x08005BAC
+ *  - IRAM_SECTION2（含 .prgend/abs）：0x1C000000 .. ~0x1C010C9C
+ * MAP_SIZE 取 32MB：覆盖段尾并留余量，避免固件偶发越界 UC_ERR_MAP（须 4KB 对齐）。
+ */
+#define GUEST_IRAM_SECTION0_BASE      0x08000000u
+#define GUEST_IRAM_SECTION0_MAP_SIZE  0x02000000u
+#define GUEST_IRAM_SECTION2_BASE      0x1C000000u
+#define GUEST_IRAM_SECTION2_MAP_SIZE  0x02000000u
 
 /*
  * HalRtcGetSecondCount 钩子注入的「秒计数」与 mktime(2000-01-01 00:00:00 本地) 的差值修正。

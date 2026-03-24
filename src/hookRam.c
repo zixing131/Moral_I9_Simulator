@@ -419,11 +419,11 @@ static void de_schedule_deferred_refresh(u32 srcBuf, u32 pitch, u16 w, u16 h)
     de_deferred_h = h;
     De_LastTriggerTime = moral_get_ticks_ms();
 
-    if (w >= (DE_PANEL_W - 20u) && h >= (DE_PANEL_H - 80u))
-    {
+    // if (w >= (DE_PANEL_W - 20u) && h >= (DE_PANEL_H - 80u))
+    // {
         Lcd_FullScreen_Ptr = srcBuf;
         De_PeriodicRefreshAllowed = 1;
-    }
+    // }
 }
 
 void de_emulator_flush_pending(void)
@@ -742,13 +742,13 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         {
             Lcd_Buffer_Ptr &= 0xffff0000;
             Lcd_Buffer_Ptr |= (value & 0xffff);
-            if (Lcd_Update_W >= DE_PANEL_W && Lcd_Update_H >= DE_PANEL_H &&
-                Lcd_Buffer_Ptr >= 0x1000u && Lcd_Buffer_Ptr < 0x8000000u)
-            {
-                if (Lcd_FullScreen_Ptr != 0 && Lcd_FullScreen_Ptr != Lcd_Buffer_Ptr)
+            // if (Lcd_Update_W >= DE_PANEL_W && Lcd_Update_H >= DE_PANEL_H &&
+            //     Lcd_Buffer_Ptr >= 0x1000u && Lcd_Buffer_Ptr < 0x8000000u)
+            // {
+                //if (Lcd_FullScreen_Ptr != 0 && Lcd_FullScreen_Ptr != Lcd_Buffer_Ptr)
                     De_PeriodicRefreshAllowed = 1;
                 Lcd_FullScreen_Ptr = Lcd_Buffer_Ptr;
-            }
+            // }
         }
         break;
     case 0x74003044:
@@ -928,12 +928,12 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 u32 srcBuf = Lcd_Buffer_Ptr;
                 u16 w = (u16)Lcd_Update_W;
                 u16 h = (u16)Lcd_Update_H;
-                if (w >= DE_PANEL_W && h >= DE_PANEL_H &&
-                    srcBuf >= 0x1000u && srcBuf < 0x8000000u)
-                {
+                // if (w >= DE_PANEL_W && h >= DE_PANEL_H &&
+                //     srcBuf >= 0x1000u && srcBuf < 0x8000000u)
+                // {
                     Lcd_FullScreen_Ptr = srcBuf;
                     De_PeriodicRefreshAllowed = 1;
-                }
+                // }
                 lcd_irq_enqueue_throttled();
             }
             tmp = 0xF00;

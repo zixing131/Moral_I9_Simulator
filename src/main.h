@@ -74,8 +74,7 @@ u8 *readSDFile(unsigned long long startPos, u32 size);
 /* SDHC CSD：与 fat32.img 文件大小一致（扇区数，1024 对齐） */
 unsigned long sd_get_reported_sectors_for_csd(void);
 void sd_fill_csd_v2_regs(u32 csd_regs[9]);
-void saveFlashFile();
-void readFlashFile();
+
 void StartCallback(u32 callbackAddr, u32 r0);
 bool StartInterrupt(u32, u32);
 void handleEvent_EMU(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);

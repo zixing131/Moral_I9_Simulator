@@ -4,7 +4,6 @@
 #include "main.h"
 #include "hookRam.c"
 
-#include "dsp.h"
 #include "myui.c"
 #include "msdc.c"
 #include "uart.c"
@@ -448,8 +447,7 @@ void loop()
     if (SD_File_Handle != NULL)
         fclose(SD_File_Handle);
     SD_File_Handle = NULL;
-    g_sd_img_max_bytes = 0;
-    saveFlashFile();
+    g_sd_img_max_bytes = 0; 
 }
 
 /**
@@ -1092,83 +1090,11 @@ static void moral_uc_write_low_and_xram(const u8 *buf, size_t total)
         else if (total - low_max > rest)
             printf("[mem] WARN: %u bytes beyond low+XRAM not loaded\n", (unsigned)(total - low_max - rest));
     }
-}
-
-void readFlashFile()
-{
-    u8 *tmp;
-    u8 flag;
-    u32 startPos;
-    u32 size;
-    FILE *FLASH_File_Handle = fopen(FLASH_IMG_PATH, "rb");
-    if (FLASH_File_Handle == NULL)
-    {
-        printf("没有Flash文件，加载失败\n");
-        return;
-    }
-    if (FLASH_File_Handle == NULL)
-        return;
-    fseek(FLASH_File_Handle, 0, SEEK_END);
-    size = ftell(FLASH_File_Handle);
-    // 读取文件内容到 tmp 中
-    tmp = (u8 *)SDL_malloc(size);
-    if (tmp == NULL)
-        return;
-    fseek(FLASH_File_Handle, 0, SEEK_SET);
-    size_t result = fread(tmp, 1, size, FLASH_File_Handle);
-    if (result != size)
-    {
-        printf("Flash文件大小校验不通过，加载失败\n");
-        fclose(FLASH_File_Handle);
-        SDL_free(tmp);
-        return;
-    }
-    moral_uc_write_low_and_xram(tmp, size);
-    SDL_free(tmp);
-    fclose(FLASH_File_Handle);
-    printf("Flash文件加载成功\n");
-}
-
-void saveFlashFile()
-{
-    int flag;
-    FILE *FLASH_File_Handle = fopen(FLASH_IMG_TEMP_PATH, "wb");
-    if (FLASH_File_Handle == NULL)
-        return;
-    char *tmp = SDL_malloc(size_16mb);
-    if (tmp == NULL)
-        return;
-    {
-        const size_t low_n = (size_t)GUEST_LOW_IMAGE_MAP_SIZE;
-        size_t xr = (size_t)size_16mb - low_n;
-        if (xr > (size_t)GUEST_IDA_XRAM_SIZE)
-            xr = (size_t)GUEST_IDA_XRAM_SIZE;
-        uc_mem_read(MTK, ROM_ADDRESS, tmp, low_n);
-        uc_mem_read(MTK, GUEST_IDA_XRAM_BASE, tmp + low_n, xr);
-        if (low_n + xr < (size_t)size_16mb)
-            memset(tmp + low_n + xr, 0, (size_t)size_16mb - low_n - xr);
-    }
-    size_t result = fwrite(tmp, 1, size_16mb, FLASH_File_Handle);
-    if (result != size_16mb)
-    {
-        fclose(FLASH_File_Handle);
-        printf("写入Flash文件失败\n");
-        return;
-    }
-    fclose(FLASH_File_Handle);
-    flag = remove(FLASH_IMG_PATH);
-    if (flag != 0)
-    {
-        printf("删除Flash文件失败");
-        printf("errno = %d\n", errno);
-    }
-    if (rename(FLASH_IMG_TEMP_PATH, FLASH_IMG_PATH) != 0)
-        printf("重命名flash_tmp失败");
-    return;
-}
+} 
 /**
- * 初始化模拟CPU引擎与内存
- *
+ * 初始化模拟 CPU 与内存映射。
+ * 目标 SoC：MT6252；外设窗口（0x34/0x74/0x81/0x82/0x90 等）按该系常见布局 + 本固件 IDA。
+ * CPU 模型用 Cortex-A9：真机为 ARM926，Unicorn 的 926 模型易触发 UC_ERR_EXCEPTION。
  */
 void initMtkSimalator()
 {
@@ -1185,16 +1111,26 @@ void initMtkSimalator()
         printf("Failed on uc_open() with error returned: %u (%s)\n", err, uc_strerror(err));
         return NULL;
     }
+    /*
+     * MT6252 芯片为 ARM926EJ-S，但 Unicorn 的 UC_CPU_ARM_926 对部分 Thumb-2 / 异常路径
+     * 支持不完整，易出现 UC_ERR_EXCEPTION。此处用 Cortex-A9 以跑通本固件（ISA 更宽）。
+     */
     uc_ctl_set_cpu_model(MTK, UC_CPU_ARM_CORTEX_A9);
 
     ROM_MEMPOOL = SDL_malloc(size_16mb);
 
-    ROM2_MEMPOOL = SDL_malloc(size_32mb);
+    ROM2_MEMPOOL = SDL_malloc((size_t)GUEST_IRAM_SECTION0_MAP_SIZE);
 
     /* 勿映射满 16MB：须留出 0x00D00000 给 IDA XRAM，否则与触摸/MMI 全局量冲突 → err 11 */
     err = uc_mem_map_ptr(MTK, ROM_ADDRESS, GUEST_LOW_IMAGE_MAP_SIZE, UC_PROT_ALL, ROM_MEMPOOL);
-    //??
-    err = uc_mem_map_ptr(MTK, 0x8000000, size_32mb, UC_PROT_ALL, ROM2_MEMPOOL);
+    /* IDA：IRAM_SECTION0 / IRAM_SECTION / IRAM_RF_SECTION，约 0x08000000..0x08005BAC */
+    err = uc_mem_map_ptr(MTK, GUEST_IRAM_SECTION0_BASE, (size_t)GUEST_IRAM_SECTION0_MAP_SIZE,
+                         UC_PROT_ALL, ROM2_MEMPOOL);
+    if (err != UC_ERR_OK)
+        printf("[mem] map IRAM_SECTION0 @0x%X err %u (%s)\n", GUEST_IRAM_SECTION0_BASE, err, uc_strerror(err));
+    else
+        printf("[mem] Mapped IDA IRAM_SECTION0..RF 0x%08X size=0x%X\n", GUEST_IRAM_SECTION0_BASE,
+               (unsigned)GUEST_IRAM_SECTION0_MAP_SIZE);
     //??
     err = uc_mem_map_ptr(MTK, 0x7000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
     // 也是一段RAM?
@@ -1236,10 +1172,25 @@ void initMtkSimalator()
     //??
     err = uc_mem_map_ptr(MTK, 0x60000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
 
-    // DSP
     err = uc_mem_map_ptr(MTK, 0x50000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
-    //??
-    err = uc_mem_map_ptr(MTK, 0x1c000000, size_32mb, UC_PROT_ALL, SDL_malloc(size_32mb));
+
+    /* IDA：IRAM_SECTION2，约 0x1C000000..0x1C010C9C；不映射会 UC_ERR_MAP */
+    {
+        void *iram2 = SDL_malloc((size_t)GUEST_IRAM_SECTION2_MAP_SIZE);
+        if (!iram2)
+            printf("[mem] SDL_malloc IRAM_SECTION2 failed\n");
+        else
+        {
+            err = uc_mem_map_ptr(MTK, GUEST_IRAM_SECTION2_BASE, (size_t)GUEST_IRAM_SECTION2_MAP_SIZE,
+                                 UC_PROT_ALL, iram2);
+            if (err != UC_ERR_OK)
+                printf("[mem] map IRAM_SECTION2 @0x%X err %u (%s)\n", GUEST_IRAM_SECTION2_BASE, err,
+                       uc_strerror(err));
+            else
+                printf("[mem] Mapped IDA IRAM_SECTION2 0x%08X size=0x%X\n", GUEST_IRAM_SECTION2_BASE,
+                       (unsigned)GUEST_IRAM_SECTION2_MAP_SIZE);
+        }
+    }
 
     /* KER/BACKTRACE 诊断路径会访问 0x2800xxxx，缺失映射会触发 UC_ERR_MAP */
     err = uc_mem_map_ptr(MTK, 0x28000000, size_16mb, UC_PROT_ALL, SDL_malloc(size_16mb));
@@ -1313,8 +1264,7 @@ void initMtkSimalator()
             {0x3B5BA4, 0x3B5BA5},     /* fatal error check */
             {0x3B5C54, 0x3B5C55},     /* KER error */
             {0x7C322C, 0x7C3238},     /* skip mrc instructions */
-            {0x800160C, 0x800160D},   /* KER error high addr */
-            {0x1C007160, 0x1C007161}, /* KER error high addr */
+            {0xEE9DC, 0xEE9DD},       /* KER trace 后 BKPT/SVC/UDF → UC_ERR_EXCEPTION */
         };
         for (u32 ri = 0; ri < sizeof(hook_ranges) / sizeof(hook_ranges[0]); ri++)
         {
@@ -1812,6 +1762,42 @@ void hookBlockCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *use
 
 u8 mssend_pop_log = 0;
 
+/* ker_trace / KER 路径上 PC 落 0xEE9DC 时，单条 Thumb 指令会触发 UC_ERR_EXCEPTION（常见 BKPT/SVC/UDF 等） */
+static void moral_thumb_skip_current_insn(void)
+{
+    u32 pc_raw, cpsr, tpc, npc;
+    u16 hw1, hw2;
+
+    uc_reg_read(MTK, UC_ARM_REG_PC, &pc_raw);
+    uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
+    tpc = pc_raw & ~1u;
+
+    if (uc_mem_read(MTK, tpc, &hw1, 2) != UC_ERR_OK)
+        return;
+
+    u32 ilen;
+    if (cpsr & 0x20u)
+    {
+        u32 top5 = ((u32)hw1 >> 11) & 0x1fu;
+        if (top5 == 0x1du || top5 == 0x1eu || top5 == 0x1fu)
+        {
+            if (uc_mem_read(MTK, tpc + 2u, &hw2, 2) != UC_ERR_OK)
+                return;
+            ilen = 4u;
+            (void)hw2;
+        }
+        else
+            ilen = 2u;
+    }
+    else
+        ilen = 4u;
+
+    npc = tpc + ilen;
+    if (cpsr & 0x20u)
+        npc |= 1u;
+    uc_reg_write(MTK, UC_ARM_REG_PC, &npc);
+}
+
 void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
     u32 tmp1, tmp2, tmp3, tmp4;
@@ -2162,14 +2148,18 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         break;
     case 0x3B5A00 + 1:
 #if MORAL_LOG_KERNEL_TRACE
+        /* 原代码两次写入 tmp1，丢失 R0；格式串在 R1，参数在 R2/R3（与 ker_trace 一致） */
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
-        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
-        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
-        uc_mem_read(MTK, tmp1, globalSprintfBuff, 128);
-        printf("[KER_VTRACE]");
-        printf("%s,%x,%x", globalSprintfBuff, tmp2, tmp3);
-        printf("(%x)\n", lastAddress);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        if (tmp2 >= 0x1000u && tmp2 < 0xF0000000u &&
+            uc_mem_read(MTK, tmp2, globalSprintfBuff, 128) == UC_ERR_OK)
+        {
+            globalSprintfBuff[127] = '\0';
+            printf("[KER_VTRACE]%s,%x,%x(%x)\n", globalSprintfBuff, tmp3, tmp4, (u32)address);
+        }
+        (void)tmp1;
 #endif
         break;
     case 0x36ed44:
@@ -2232,10 +2222,6 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     //     printf("SetRegValue(%x,%x,%x)\n", tt, tmp2, tmp3);
     //     break;
 
-    // case 0x1C00D124: // 跳过kmDevCheck
-    //     tmp1 = 0x1C00D131;
-    //     uc_reg_write(MTK, UC_ARM_REG_PC, &tmp1);
-    //     break;
     case 0x2cb28: // DrvDMA2DCmdFinish - skip and return success
     {
         tmp1 = 1;
@@ -2257,17 +2243,6 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     //     uc_reg_read(MTK, UC_ARM_REG_R2, &tmp1);
     //     uc_reg_read(MTK, UC_ARM_REG_R5, &tmp2);
     //     printf("Compare R2<>R5 %x %x\n", tmp1, tmp2);
-    //     break;
-    // case 0x1C00D420:
-    //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-    //     uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-    //     printf("KmMemoryGet(%x,%x)(%x)\n", tmp1, tmp2, lastAddress);
-    //     break;
-    // case 0x1C00D122:
-    //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-    //     uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-    //     uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-    //     printf("__KmDevCheck(%x,%x,%x)(%x)\n", tmp1, tmp2, tmp3, lastAddress);
     //     break;
     case 0xA144: // 强制引脚配置正确
         uc_reg_read(MTK, UC_ARM_REG_R4, &tmp1);
@@ -2306,8 +2281,6 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
     //     printf("DrvDispWriteLcmData(%x)(%x)\n", tmp1, lastAddress);
     //     break;
-    case 0x800160C:
-    case 0x1C007160:
     case 0x3B5C54:
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         /* 勿再用 (R0&0x110000) 卡死：例如 R0=0x2001001e 为合法 SRAM 指针也会命中 */
@@ -2348,6 +2321,21 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         address += 8;
         uc_reg_write(MTK, UC_ARM_REG_PC, &address);
         break;
+    case 0xEE9DC:
+    case 0xEE9DD:
+    {
+        static u32 moral_ee9dc_log;
+        if (moral_ee9dc_log < 6u)
+        {
+            u32 tpc = (u32)address & ~1u;
+            u16 hw = 0;
+            moral_ee9dc_log++;
+            if (uc_mem_read(MTK, tpc, &hw, 2) == UC_ERR_OK)
+                printf("[UC] skip insn @%08x half=%04x (avoid UC_ERR_EXCEPTION after ker_trace)\n", tpc, hw);
+        }
+        moral_thumb_skip_current_insn();
+        break;
+    }
     }
     lastAddress = address;
 }
