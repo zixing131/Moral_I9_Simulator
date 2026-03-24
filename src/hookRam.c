@@ -353,20 +353,21 @@ static u32 de_panel_read_pitch_from_base(u32 srcBase)
 }
 
 /*
- * 检查 srcBuf 是否落在帧缓冲区间内，返回帧缓冲基址。
- *
- * 注意：DE_Layer0_Ptr 是脏区偏移后的地址（bufPtr + y*pitch + x*BPP），不是帧缓冲基址。
- * 帧缓冲基址用 Lcd_FullScreen_Ptr（在整屏 trigger 时记录）。
- * PIP 子层 (Layer1/2/3) 有独立的帧缓冲，可直接用。
+ * 检查 srcBuf 是否落在某个已知帧缓冲区间内，返回该帧缓冲基址。
+ * 固件使用双缓冲（DispSetLayerFormat 交替配不同 GDI buffer），
+ * 用 Lcd_FullScreen_Ptr / Lcd_FullScreen_Ptr2 跟踪两个基址。
  */
 static u32 de_guest_fb_base_containing(u32 srcBuf)
 {
     u32 fbBytes = (u32)DE_PANEL_W * (u32)DE_PANEL_H * DE_BPP;
 
-    /* 优先检查帧缓冲基址 */
     if (Lcd_FullScreen_Ptr >= 0x1000u && Lcd_FullScreen_Ptr < 0x8000000u &&
         srcBuf >= Lcd_FullScreen_Ptr && srcBuf < Lcd_FullScreen_Ptr + fbBytes)
         return Lcd_FullScreen_Ptr;
+
+    if (Lcd_FullScreen_Ptr2 >= 0x1000u && Lcd_FullScreen_Ptr2 < 0x8000000u &&
+        srcBuf >= Lcd_FullScreen_Ptr2 && srcBuf < Lcd_FullScreen_Ptr2 + fbBytes)
+        return Lcd_FullScreen_Ptr2;
 
     return 0u;
 }
@@ -836,6 +837,24 @@ static void lcd_irq_enqueue_throttled(void)
  * 相当于「驱动提交本帧」后再采样显存，避免主线程轮询 uc_mem_read 与 CPU 写屏交错导致撕裂。
  * 仅把 RGB565 拷到 Lcd_Cache_Buffer 并登记 s_lcd_host_blit_*；SDL 画屏在主线程 de_lcd_apply_pending_host_blit。
  */
+/*
+ * IDA 调用链（每次 DE 刷新必经）：
+ *   DrvLcdUpdate(lcd, x, y, w, h, layerFormat)
+ *     → DrvLcdSetDisplayRange(x, y, w, h)      ← SWI 0xc166, 我们存到 Lcd_Update_X/Y/W/H
+ *     → HalDispUpdateQuick → HalDispSetLayerBuffer
+ *       → HalDispSetBufInfo(0, w, h, pitch=480, bufPtr + y*480 + x*2)
+ *         写 0x74003040 = bufPtr + y*pitch + x*BPP  (脏区首地址)
+ *         写 0x74003048 = w, 4C = h, 50 = pitch
+ *     → HalDispForceUpdate → 写 0x7400313C = 1
+ *
+ * 因此 DE trigger 时：
+ *   Lcd_Update_X/Y = 脏区屏幕坐标 (x, y)（由 SWI 0xc166 提供，100% 可靠）
+ *   DE_Layer0_Ptr   = 帧缓冲基址 + y*pitch + x*BPP
+ *   DE_Layer0_W/H   = 脏区宽高
+ *   DE_Layer0_Pitch = 整屏行距（始终 480）
+ *
+ * 帧缓冲基址 = DE_Layer0_Ptr - Lcd_Update_Y * pitch - Lcd_Update_X * BPP
+ */
 static void de_try_snapshot_fb_at_de_trigger(u32 srcBuf_in, u32 pitch_in, u16 w_in, u16 h_in, int is_cursor)
 {
     u32 srcBuf = srcBuf_in;
@@ -843,21 +862,53 @@ static void de_try_snapshot_fb_at_de_trigger(u32 srcBuf_in, u32 pitch_in, u16 w_
     u16 w = w_in;
     u16 h = h_in;
     uint64_t now = moral_get_ticks_ms();
-    u16 dstX, dstY;
+    u16 dstX = 0, dstY = 0;
 
     if (!is_cursor)
     {
         De_LastTriggerTime = now;
         De_PeriodicRefreshAllowed = 1;
-        /* 整屏刷新时，srcBuf 就是帧缓冲基址，更新 Lcd_FullScreen_Ptr */
-        if (w >= (DE_PANEL_W - 20u) && h >= (DE_PANEL_H - 80u))
-            Lcd_FullScreen_Ptr = srcBuf;
+
         /*
-         * 局部刷新时：srcBuf 是脏区首地址，需找到包含它的帧缓冲基址并扩展为整屏读，
-         * 否则只画局部矩形到 SDL，其他区域保持不变（这在真机上由 DE DMA 完成）。
+         * 利用 Lcd_Update_X/Y（SWI 0xc166）推算帧缓冲基址，
+         * 然后扩展为整屏读（把整帧拷到 Lcd_Cache_Buffer，保持 SDL 内容完整）。
          */
-        if (w < (DE_PANEL_W - 20u) || h < (DE_PANEL_H - 80u))
+        u32 updateX = Lcd_Update_X;
+        u32 updateY = Lcd_Update_Y;
+        u32 byteOff = updateY * pitch + updateX * DE_BPP;
+
+        /* 反推帧缓冲基址 */
+        u32 frameBase = 0u;
+        if (byteOff <= srcBuf && srcBuf - byteOff >= 0x1000u)
+            frameBase = srcBuf - byteOff;
+
+        /* 记录已知帧缓冲基址（双缓冲跟踪） */
+        if (frameBase >= 0x1000u && frameBase < 0x8000000u)
         {
+            if (frameBase != Lcd_FullScreen_Ptr && frameBase != Lcd_FullScreen_Ptr2)
+            {
+                Lcd_FullScreen_Ptr2 = Lcd_FullScreen_Ptr;
+                Lcd_FullScreen_Ptr = frameBase;
+            }
+            else if (frameBase != Lcd_FullScreen_Ptr)
+            {
+                /* 已知的第二个 base 又被使用了，提升为 primary */
+                Lcd_FullScreen_Ptr2 = Lcd_FullScreen_Ptr;
+                Lcd_FullScreen_Ptr = frameBase;
+            }
+        }
+
+        /* 扩展为整屏读 */
+        if (frameBase >= 0x1000u && frameBase < 0x8000000u)
+        {
+            srcBuf = frameBase;
+            w = (u16)DE_PANEL_W;
+            h = (u16)DE_PANEL_H;
+            /* pitch 保持 DE_Layer0_Pitch（整屏行距） */
+        }
+        else if (w < (DE_PANEL_W - 20u) || h < (DE_PANEL_H - 80u))
+        {
+            /* 无法推算基址，兜底用 Lcd_FullScreen_Ptr */
             u32 expandBase = de_guest_fb_base_containing(srcBuf_in);
             if (expandBase != 0u)
             {
@@ -865,6 +916,12 @@ static void de_try_snapshot_fb_at_de_trigger(u32 srcBuf_in, u32 pitch_in, u16 w_
                 pitch = de_guest_pitch_for_full_panel_read(expandBase);
                 w = (u16)DE_PANEL_W;
                 h = (u16)DE_PANEL_H;
+            }
+            else
+            {
+                /* 完全无法扩展，只画局部——用 Lcd_Update_X/Y 做目的坐标 */
+                dstX = (u16)updateX;
+                dstY = (u16)updateY;
             }
         }
     }
@@ -911,13 +968,12 @@ static void de_try_snapshot_fb_at_de_trigger(u32 srcBuf_in, u32 pitch_in, u16 w_
             return;
     }
 
+    /* 整屏扩展成功时 dstX/dstY 保持 0；局部回退时已设为 Lcd_Update_X/Y */
     if (w == DE_PANEL_W && h == DE_PANEL_H)
     {
         dstX = 0;
         dstY = 0;
     }
-    else
-        de_resolve_blit_dest(srcBuf, &dstX, &dstY);
 
     s_lcd_host_blit_dstX = dstX;
     s_lcd_host_blit_dstY = dstY;
@@ -1680,11 +1736,12 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             if (pitch == 0u)
                 pitch = (u32)w * DE_BPP;
 
-            if (de_trigger_cnt <= 30 || (de_trigger_cnt % 200) == 0)
+            if (de_trigger_cnt <= 50 || (de_trigger_cnt % 200) == 0)
             {
-                printf("[DE-trigger] #%u L0=0x%x W=%u H=%u pitch=%u | L1=0x%x W=%u | srcBuf=0x%x w=%u h=%u\n",
-                       de_trigger_cnt, DE_Layer0_Ptr, DE_Layer0_W, DE_Layer0_H, DE_Layer0_Pitch,
-                       DE_Layer1_Ptr, DE_Layer1_W, srcBuf, w, h);
+                printf("[DE-trigger] #%u src=0x%x w=%u h=%u pitch=%u | updXY=(%u,%u) updWH=(%u,%u) | FSP=0x%x FSP2=0x%x\n",
+                       de_trigger_cnt, srcBuf, w, h, pitch,
+                       Lcd_Update_X, Lcd_Update_Y, Lcd_Update_W, Lcd_Update_H,
+                       Lcd_FullScreen_Ptr, Lcd_FullScreen_Ptr2);
             }
 
             u8 is_cursor_de = (w <= 20u && h <= 20u);
@@ -1763,8 +1820,9 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
 
             if (!is_reset)
             {
-                u32 srcBuf = Lcd_Buffer_Ptr;
-                Lcd_FullScreen_Ptr = srcBuf;
+                /* FMark 来自 HalDispSWFMarkTrigger，此时 Layer0 寄存器已写了脏区参数。
+                 * Lcd_Buffer_Ptr (= DE_Layer0_Ptr) 是脏区偏移后的地址，不是帧缓冲基址。
+                 * 不更新 Lcd_FullScreen_Ptr——它已在 de_try_snapshot 整屏路径里正确设置。 */
                 De_PeriodicRefreshAllowed = 1;
                 lcd_irq_enqueue_throttled();
             }

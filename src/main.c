@@ -1452,6 +1452,7 @@ void initMtkSimalator()
         int hi = 0;
         static const u32 hook_ranges[][2] = {
             {0xA144, 0xA145},         /* pin config */
+            {0xC166, 0xC167},         /* DrvLcdSetDisplayRange: 捕获脏区 x,y,w,h */
             {0xCD44, 0xCD45},         /* LCD params */
             {0x1E574, 0x1E575},       /* HalDispTransAddr */
             {0x2AE1C, 0x2AE1D},       /* ker_assert */

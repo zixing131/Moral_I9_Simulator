@@ -193,6 +193,7 @@ typedef struct VM_DMA_CONFIG_
 
 u32 Lcd_Buffer_Ptr;
 u32 Lcd_FullScreen_Ptr;
+u32 Lcd_FullScreen_Ptr2;  /* 双缓冲跟踪：记住上一个已知的帧缓冲基址 */
 /* DrvLcdSetDisplayRange / SWI 0xc166：R0,R1,R2,R3 = 脏矩形 x,y,w,h */
 u32 Lcd_Update_X;
 u32 Lcd_Update_Y;
