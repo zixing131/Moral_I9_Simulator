@@ -280,27 +280,38 @@ static void de_blit_to_sdl(u16 dstX, u16 dstY, u16 w, u16 h, u32 cachePitch)
     de_blit_rgb565_to_surface(sfc, Lcd_Cache_Buffer, dstX, dstY, w, h, cachePitch);
 }
 
+/* 返回包含 srcBuf 的主帧缓冲基址；优先 DE 层寄存器，其次 0x74003040 登记的基址 */
+static u32 de_guest_fb_base_containing(u32 srcBuf)
+{
+    u32 fbBytes = (u32)DE_PANEL_W * (u32)DE_PANEL_H * DE_BPP;
+
+    if (DE_Layer0_Ptr >= 0x1000u && DE_Layer0_Ptr < 0x8000000u &&
+        srcBuf >= DE_Layer0_Ptr && srcBuf < DE_Layer0_Ptr + fbBytes)
+        return DE_Layer0_Ptr;
+    if (Lcd_FullScreen_Ptr >= 0x1000u && Lcd_FullScreen_Ptr < 0x8000000u &&
+        srcBuf >= Lcd_FullScreen_Ptr && srcBuf < Lcd_FullScreen_Ptr + fbBytes)
+        return Lcd_FullScreen_Ptr;
+    return 0u;
+}
+
 static void de_resolve_blit_dest(u32 srcBuf, u16 *dstX, u16 *dstY)
 {
     u16 x = (u16)Lcd_Update_X;
     u16 y = (u16)Lcd_Update_Y;
 
-    if (Lcd_FullScreen_Ptr != 0u && srcBuf >= Lcd_FullScreen_Ptr)
+    u32 base = de_guest_fb_base_containing(srcBuf);
+    if (base != 0u)
     {
-        u32 fbBytes = (u32)DE_PANEL_W * (u32)DE_PANEL_H * DE_BPP;
-        if (srcBuf < Lcd_FullScreen_Ptr + fbBytes)
+        u32 off = srcBuf - base;
+        u32 mainPitch = (u32)DE_PANEL_W * DE_BPP;
+        if (DE_Layer0_Pitch >= mainPitch && DE_Layer0_Pitch < 8192u)
+            mainPitch = DE_Layer0_Pitch;
+        u32 ty = off / mainPitch;
+        u32 tx = (off % mainPitch) / DE_BPP;
+        if (ty < DE_PANEL_H && tx < DE_PANEL_W)
         {
-            u32 off = srcBuf - Lcd_FullScreen_Ptr;
-            u32 mainPitch = (u32)DE_PANEL_W * DE_BPP;
-            if (DE_Layer0_Pitch >= mainPitch && DE_Layer0_Pitch < 8192u)
-                mainPitch = DE_Layer0_Pitch;
-            y = (u16)(off / mainPitch);
-            x = (u16)((off % mainPitch) / DE_BPP);
-            if (y >= DE_PANEL_H || x >= DE_PANEL_W)
-            {
-                x = (u16)Lcd_Update_X;
-                y = (u16)Lcd_Update_Y;
-            }
+            x = (u16)tx;
+            y = (u16)ty;
         }
     }
     *dstX = x;
@@ -411,17 +422,86 @@ static void lcd_irq_enqueue_throttled(void)
     EnqueueVMEvent(VM_EVENT_LCD_IRQ, 0, 0);
 }
 
-static void de_schedule_deferred_refresh(u32 srcBuf, u32 pitch, u16 w, u16 h)
+/*
+ * 在 Guest 写 DE 触发寄存器 0x7400313C 的 MMIO 回调里同步执行（CPU 尚未执行下一条指令）：
+ * 相当于「驱动提交本帧」后再采样显存，避免主线程轮询 uc_mem_read 与 CPU 写屏交错导致撕裂。
+ * 仅把 RGB565 拷到 Lcd_Cache_Buffer 并登记 s_lcd_host_blit_*；SDL 画屏在主线程 de_lcd_apply_pending_host_blit。
+ */
+static void de_try_snapshot_fb_at_de_trigger(u32 srcBuf_in, u32 pitch_in, u16 w_in, u16 h_in, int is_cursor)
 {
-    de_deferred_pending = 1;
-    de_deferred_src_buf = srcBuf;
-    de_deferred_pitch = pitch;
-    de_deferred_w = w;
-    de_deferred_h = h;
-    De_LastTriggerTime = moral_get_ticks_ms();
+    u32 srcBuf = srcBuf_in;
+    u32 pitch = pitch_in;
+    u16 w = w_in;
+    u16 h = h_in;
+    uint64_t now = moral_get_ticks_ms();
+    u16 dstX, dstY;
 
-    Lcd_FullScreen_Ptr = srcBuf;
-    De_PeriodicRefreshAllowed = 1;
+    if (!is_cursor)
+    {
+        De_LastTriggerTime = now;
+        De_PeriodicRefreshAllowed = 1;
+        /*
+         * 禁止把 Lcd_FullScreen_Ptr 改成本次 srcBuf_in：局部刷新时 src 是子矩形首地址，
+         * 若当作基址则 off=0 → 画到左上角；扩展整屏读也会从错误地址拉满屏 → 整屏错位/底边花屏。
+         * 全屏基址只应由 0x74003040 / FMark 等路径更新；扩展读用 layer0 或已有 FullScreen 基址。
+         */
+        if (w < (DE_PANEL_W - 20u) || h < (DE_PANEL_H - 80u))
+        {
+            u32 expandBase = de_guest_fb_base_containing(srcBuf_in);
+            if (expandBase != 0u)
+            {
+                srcBuf = expandBase;
+                pitch = (u32)DE_PANEL_W * DE_BPP;
+                if (DE_Layer0_Pitch >= pitch && DE_Layer0_Pitch < 8192u)
+                    pitch = DE_Layer0_Pitch;
+                w = (u16)DE_PANEL_W;
+                h = (u16)DE_PANEL_H;
+            }
+        }
+    }
+
+    if (srcBuf < 0x1000u || srcBuf >= 0x8000000u || w == 0 || h == 0)
+        return;
+
+    if (pitch == 0u)
+        pitch = (u32)w * DE_BPP;
+
+    if (de_read_fb(srcBuf, pitch, w, h) != 0)
+        return;
+
+    if (!is_cursor && w >= DE_PANEL_W - 20u && h >= DE_PANEL_H - 80u)
+    {
+        u32 rowBytes = (u32)w * DE_BPP;
+        u32 step = (rowBytes < 16u) ? 2u : 16u;
+        u32 cnt = 0, white = 0;
+        for (u32 off = 0; off < (u32)h * rowBytes && cnt < 64u; off += step)
+        {
+            cnt++;
+            if (off + 1u < (u32)h * rowBytes &&
+                Lcd_Cache_Buffer[off] == 0xFFu && Lcd_Cache_Buffer[off + 1u] == 0xFFu)
+                white++;
+        }
+        if (cnt > 0 && white * 10u >= cnt * 9u)
+            return;
+    }
+
+    if (w == DE_PANEL_W && h == DE_PANEL_H)
+    {
+        dstX = 0;
+        dstY = 0;
+    }
+    else
+        de_resolve_blit_dest(srcBuf, &dstX, &dstY);
+
+    s_lcd_host_blit_dstX = dstX;
+    s_lcd_host_blit_dstY = dstY;
+    s_lcd_host_blit_w = w;
+    s_lcd_host_blit_h = h;
+    s_lcd_host_blit_pitch = (u32)w * DE_BPP;
+    s_lcd_host_blit_pending = 1;
+    if (!is_cursor)
+        de_deferred_last_draw = now;
+    Perf_LcdRefreshCount++;
 }
 
 void de_emulator_flush_pending(void)
@@ -430,7 +510,6 @@ void de_emulator_flush_pending(void)
     u32 pitch;
     u16 w;
     u16 h;
-    uint64_t now;
 
     if (!de_deferred_pending)
         return;
@@ -441,14 +520,14 @@ void de_emulator_flush_pending(void)
 
         if (min_iv < 1)
             min_iv = 1;
-        now = moral_get_ticks_ms();
+        uint64_t now = moral_get_ticks_ms();
         if (de_deferred_last_draw != 0 && (now - de_deferred_last_draw) < min_iv)
             return; /* 保留 de_deferred_pending，下轮再读 FB；勿丢弃刷新请求 */
     }
 #endif
 
 #if !MORAL_EMU_DEDICATED_THREAD
-    now = moral_get_ticks_ms();
+    uint64_t now = moral_get_ticks_ms();
 #endif
 
     srcBuf = de_deferred_src_buf;
@@ -456,13 +535,18 @@ void de_emulator_flush_pending(void)
     w = de_deferred_w;
     h = de_deferred_h;
 
-    if (Lcd_FullScreen_Ptr >= 0x1000u && Lcd_FullScreen_Ptr < 0x8000000u &&
-        (w < (DE_PANEL_W - 20u) || h < (DE_PANEL_H - 80u)))
+    if (w < (DE_PANEL_W - 20u) || h < (DE_PANEL_H - 80u))
     {
-        srcBuf = Lcd_FullScreen_Ptr;
-        pitch = DE_PANEL_W * DE_BPP;
-        w = (u16)DE_PANEL_W;
-        h = (u16)DE_PANEL_H;
+        u32 expandBase = de_guest_fb_base_containing(de_deferred_src_buf);
+        if (expandBase != 0u)
+        {
+            srcBuf = expandBase;
+            pitch = (u32)DE_PANEL_W * DE_BPP;
+            if (DE_Layer0_Pitch >= pitch && DE_Layer0_Pitch < 8192u)
+                pitch = DE_Layer0_Pitch;
+            w = (u16)DE_PANEL_W;
+            h = (u16)DE_PANEL_H;
+        }
     }
 
     if (srcBuf < 0x1000u || srcBuf >= 0x8000000u || w == 0 || h == 0)
@@ -598,13 +682,18 @@ void de_emulator_service_guest_fb_pull(void)
             w = de_deferred_w;
             h = de_deferred_h;
 
-            if (Lcd_FullScreen_Ptr >= 0x1000u && Lcd_FullScreen_Ptr < 0x8000000u &&
-                (w < (DE_PANEL_W - 20u) || h < (DE_PANEL_H - 80u)))
+            if (w < (DE_PANEL_W - 20u) || h < (DE_PANEL_H - 80u))
             {
-                srcBuf = Lcd_FullScreen_Ptr;
-                pitch = DE_PANEL_W * DE_BPP;
-                w = (u16)DE_PANEL_W;
-                h = (u16)DE_PANEL_H;
+                u32 expandBase = de_guest_fb_base_containing(de_deferred_src_buf);
+                if (expandBase != 0u)
+                {
+                    srcBuf = expandBase;
+                    pitch = (u32)DE_PANEL_W * DE_BPP;
+                    if (DE_Layer0_Pitch >= pitch && DE_Layer0_Pitch < 8192u)
+                        pitch = DE_Layer0_Pitch;
+                    w = (u16)DE_PANEL_W;
+                    h = (u16)DE_PANEL_H;
+                }
             }
 
             if (srcBuf < 0x1000u || srcBuf >= 0x8000000u || w == 0 || h == 0)
@@ -969,14 +1058,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                     (now - cursor_de_last_draw) >= min_interval)
                 {
                     cursor_de_last_draw = now;
-                    if (de_read_fb(srcBuf, pitch, w, h) == 0)
-                    {
-                        u16 dstX, dstY;
-                        de_resolve_blit_dest(srcBuf, &dstX, &dstY);
-                        de_blit_to_sdl(dstX, dstY, w, h, (u32)w * DE_BPP);
-                        Lcd_Need_Update = 1;
-                        Perf_LcdRefreshCount++;
-                    }
+                    de_try_snapshot_fb_at_de_trigger(srcBuf, pitch, w, h, 1);
                 }
 
                 tmp = 0xF00;
@@ -984,7 +1066,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             }
             else
             {
-                de_schedule_deferred_refresh(srcBuf, pitch, w, h);
+                de_try_snapshot_fb_at_de_trigger(srcBuf, pitch, w, h, 0);
                 tmp = 0xF00;
                 uc_mem_write(MTK, 0x74003148u, &tmp, 4);
                 lcd_irq_enqueue_throttled();
