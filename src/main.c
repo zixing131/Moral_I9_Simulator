@@ -1502,6 +1502,7 @@ void FindNorFlashId()
 void RunArmProgram(void *startAddr)
 {
     u32 pc = (u32)(size_t)startAddr;
+    u32 cpsr = 0;
     uc_err p;
 
 #ifdef GDB_SERVER_SUPPORT
@@ -1511,28 +1512,39 @@ void RunArmProgram(void *startAddr)
     gdb_readMemFunc = readMemoryToGdb;
 #endif
 
+    uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
+
     /*
-     * count=200000: 正常执行时约每 200K 条指令返回一次处理事件，开销极低。
-     * timeout=100000 (100ms): 安全网——如果固件陷入 tight loop 等中断，
-     *   100ms 后强制返回投递中断，防止永久卡死。
-     * 两个条件同时设置，哪个先满足就先返回。
+     * 旧逻辑每轮都固定用 100ms/200K 指令时间片，并且无条件读 CPSR、处理事件；
+     * 在「没有待处理事件」时这会产生不必要的 stop/start 与寄存器往返开销。
+     *
+     * 改为自适应策略：
+     * 1. 有待处理事件时，用较短时间片，尽快回到宿主侧投递 IRQ/VM 事件。
+     * 2. 空闲时放大时间片，减少 uc_emu_start 切换频率。
+     * 3. 只有确实存在待处理事件时才进入 handleVmEvent_EMU。
      */
     for (;;)
     {
-        u32 cpsr;
-        uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
+        int has_pending = moral_vm_has_pending_events();
+        uint64_t timeout_us = has_pending ? 2000u : 20000u;
+        uint64_t instr_count = has_pending ? 20000u : 400000u;
         uint64_t start_pc = (uint64_t)(pc & ~1u);
         if (cpsr & 0x20)
             start_pc |= 1;
 
-        p = uc_emu_start(MTK, start_pc, (uint64_t)-1, 100000, 200000);
+        p = uc_emu_start(MTK, start_pc, (uint64_t)-1, timeout_us, instr_count);
         uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+        uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
 
         if (p != UC_ERR_OK)
             break;
 
-        handleVmEvent_EMU((uint64_t)pc);
-        uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+        if (has_pending || moral_vm_has_pending_events())
+        {
+            handleVmEvent_EMU((uint64_t)pc);
+            uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+            uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
+        }
     }
 
     if (p == UC_ERR_READ_UNMAPPED)
@@ -1961,11 +1973,13 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
                     if (mssend_pop_log < 20)
                     {
                         mssend_pop_log++;
-                        printf("[TS-DBG] MsSend-POP: real_R0=%u mbox=%u (touch msg)\n", tmp1, tmp2);
+                        if (MORAL_LOG_TOUCH_DEBUG)
+                            printf("[TS-DBG] MsSend-POP: real_R0=%u mbox=%u (touch msg)\n", tmp1, tmp2);
                     }
                     if (tmp1 != 10u)
                     {
-                        printf("[TS-DBG] MsSend-POP: FORCING R0 from %u to 10!\n", tmp1);
+                        if (MORAL_LOG_TOUCH_DEBUG)
+                            printf("[TS-DBG] MsSend-POP: FORCING R0 from %u to 10!\n", tmp1);
                         tmp1 = 10;
                         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
                     }
@@ -2054,7 +2068,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
          * 该值若被当成指针传入 KER_VERROR_DIAGNOSE(0x3B5C54)，R0&0x110000 非 0 会进 fatal error2；
          * 且 lastAddress 在 switch 末尾才赋值，printf 会误打成「上一条」PC（常见 1def6c）。 */
         static u32 phy_clamp_log;
-        if (phy_clamp_log < 24u)
+        if (phy_clamp_log < 4u)
         {
             phy_clamp_log++;
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);

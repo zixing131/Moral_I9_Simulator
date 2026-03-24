@@ -208,7 +208,7 @@ static u32 auxadc_get_result(void)
         result = isTouchDown ? 400u : 0u;
         break;
     }
-    if (auxadc_log_count < 5)
+    if (MORAL_LOG_TOUCH_DEBUG && auxadc_log_count < 5)
     {
         auxadc_log_count++;
         printf("[ADC-read] raw_cmd=0x%x eff_ch=0x%x result=%u down=%d x=%u y=%u\n",
@@ -463,8 +463,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 // }
                 // printf("\n");
                 if (SPI_CMD_Buf_Idx == 3)
-                { // gCmdWaitRdy__HalAsuraWaitRdy
-                    // printf("[SPI]gCmdWaitRdy__HalAsuraWaitRdy\n");
+                {
                     if (SPI_CMD_Buf[0] == 0x0 && SPI_CMD_Buf[1] == 0x4 && SPI_CMD_Buf[2] == 0xff)
                     {
                         SPI_DATA_Buf_Idx = 1;
@@ -486,10 +485,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                   // printf("[SPI] Addr:%x", addr);
                   // printf(" Value:%x\n", data);
                 }
-            }
-            if (SPI_CMD_Buf_Idx < 1)
-            {
-                printf("[SPI] error HalPagingSpiBusWrite (ignored)\n");
             }
             uc_mem_write(MTK, (u32)address, &SPI_DATA_Buf[--SPI_DATA_Buf_Idx], 4);
         }

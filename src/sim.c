@@ -8,6 +8,159 @@ VM_SIM_DEV vm_sim2_dev;
 VM_DMA_CONFIG vm_dma_sim1_config;
 VM_DMA_CONFIG vm_dma_sim2_config;
 
+static void sim_write_count_reg(SIM_CARD_NUM sim_num, u32 count)
+{
+    uc_mem_write(MTK, sim_num == SIM_CARD_NUM_CARD1 ? SIM1_COUNT : SIM2_COUNT, &count, 4);
+}
+
+static void sim_load_rx_fifo(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, const u8 *data, u32 len)
+{
+    if (len > sizeof(sim_dev->rx_buffer))
+        len = sizeof(sim_dev->rx_buffer);
+
+    if (len > 0)
+        my_memcpy(sim_dev->rx_buffer, (void *)data, len);
+
+    sim_dev->rx_buffer_index = 0;
+    sim_dev->rx_current_index = 0;
+    sim_dev->rx_remain_count = (u8)((len > 0xffu) ? 0xffu : len);
+    sim_write_count_reg(sim_num, sim_dev->rx_remain_count);
+}
+
+static void sim_get_selected_file_payload(VM_SIM_DEV *sim_dev, u8 **out_ptr, u32 *out_len)
+{
+    *out_ptr = SIM_RSP_SF_FFFF;
+    *out_len = sizeof(SIM_RSP_SF_FFFF) / sizeof(SIM_RSP_SF_FFFF[0]);
+
+    switch (sim_dev->selected_file_id)
+    {
+    case 0x2FE2:
+        *out_ptr = SIM_RSP_SF_2FE2;
+        *out_len = sizeof(SIM_RSP_SF_2FE2) / sizeof(SIM_RSP_SF_2FE2[0]);
+        break;
+    case 0x2F05:
+        *out_ptr = SIM_RSP_SF_2F05;
+        *out_len = sizeof(SIM_RSP_SF_2F05) / sizeof(SIM_RSP_SF_2F05[0]);
+        break;
+    case 0x6F05:
+        *out_ptr = SIM_RSP_SF_6F05;
+        *out_len = sizeof(SIM_RSP_SF_6F05) / sizeof(SIM_RSP_SF_6F05[0]);
+        break;
+    case 0x6F07:
+        *out_ptr = SIM_RSP_SF_6F07;
+        *out_len = sizeof(SIM_RSP_SF_6F07) / sizeof(SIM_RSP_SF_6F07[0]);
+        break;
+    case 0x6F14:
+        *out_ptr = SIM_RSP_SF_6F14;
+        *out_len = sizeof(SIM_RSP_SF_6F14) / sizeof(SIM_RSP_SF_6F14[0]);
+        break;
+    case 0x6F17:
+        *out_ptr = SIM_RSP_SF_6F17;
+        *out_len = sizeof(SIM_RSP_SF_6F17) / sizeof(SIM_RSP_SF_6F17[0]);
+        break;
+    case 0x6F20:
+        *out_ptr = SIM_RSP_SF_6F20;
+        *out_len = sizeof(SIM_RSP_SF_6F20) / sizeof(SIM_RSP_SF_6F20[0]);
+        break;
+    case 0x6F30:
+        *out_ptr = SIM_RSP_SF_6F30;
+        *out_len = sizeof(SIM_RSP_SF_6F30) / sizeof(SIM_RSP_SF_6F30[0]);
+        break;
+    case 0x6F31:
+        *out_ptr = SIM_RSP_SF_6F31;
+        *out_len = sizeof(SIM_RSP_SF_6F31) / sizeof(SIM_RSP_SF_6F31[0]);
+        break;
+    case 0x6F38:
+        *out_ptr = SIM_RSP_SF_6F38;
+        *out_len = sizeof(SIM_RSP_SF_6F38) / sizeof(SIM_RSP_SF_6F38[0]);
+        break;
+    case 0x6F40:
+        *out_ptr = SIM_RSP_SF_6F40;
+        *out_len = sizeof(SIM_RSP_SF_6F40) / sizeof(SIM_RSP_SF_6F40[0]);
+        break;
+    case 0x6F41:
+        *out_ptr = SIM_RSP_SF_6F41;
+        *out_len = sizeof(SIM_RSP_SF_6F41) / sizeof(SIM_RSP_SF_6F41[0]);
+        break;
+    case 0x6F42:
+        *out_ptr = SIM_RSP_SF_6F42;
+        *out_len = sizeof(SIM_RSP_SF_6F42) / sizeof(SIM_RSP_SF_6F42[0]);
+        break;
+    case 0x6F43:
+        *out_ptr = SIM_RSP_SF_6F43;
+        *out_len = sizeof(SIM_RSP_SF_6F43) / sizeof(SIM_RSP_SF_6F43[0]);
+        break;
+    case 0x6F44:
+        *out_ptr = SIM_RSP_SF_6F44;
+        *out_len = sizeof(SIM_RSP_SF_6F44) / sizeof(SIM_RSP_SF_6F44[0]);
+        break;
+    case 0x6F45:
+        *out_ptr = SIM_RSP_SF_6F45;
+        *out_len = sizeof(SIM_RSP_SF_6F45) / sizeof(SIM_RSP_SF_6F45[0]);
+        break;
+    case 0x6F46:
+        *out_ptr = SIM_RSP_SF_6F46;
+        *out_len = sizeof(SIM_RSP_SF_6F46) / sizeof(SIM_RSP_SF_6F46[0]);
+        break;
+    case 0x6F4A:
+        *out_ptr = SIM_RSP_SF_6F4A;
+        *out_len = sizeof(SIM_RSP_SF_6F4A) / sizeof(SIM_RSP_SF_6F4A[0]);
+        break;
+    case 0x6F4B:
+        *out_ptr = SIM_RSP_SF_6F4B;
+        *out_len = sizeof(SIM_RSP_SF_6F4B) / sizeof(SIM_RSP_SF_6F4B[0]);
+        break;
+    case 0x6F52:
+        *out_ptr = SIM_RSP_SF_6F52;
+        *out_len = sizeof(SIM_RSP_SF_6F52) / sizeof(SIM_RSP_SF_6F52[0]);
+        break;
+    case 0x6F53:
+        *out_ptr = SIM_RSP_SF_6F53;
+        *out_len = sizeof(SIM_RSP_SF_6F53) / sizeof(SIM_RSP_SF_6F53[0]);
+        break;
+    case 0x6F62:
+        *out_ptr = SIM_RSP_SF_6F62;
+        *out_len = sizeof(SIM_RSP_SF_6F62) / sizeof(SIM_RSP_SF_6F62[0]);
+        break;
+    case 0x6F74:
+        *out_ptr = SIM_RSP_SF_6F74;
+        *out_len = sizeof(SIM_RSP_SF_6F74) / sizeof(SIM_RSP_SF_6F74[0]);
+        break;
+    case 0x6F78:
+        *out_ptr = SIM_RSP_SF_6F78;
+        *out_len = sizeof(SIM_RSP_SF_6F78) / sizeof(SIM_RSP_SF_6F78[0]);
+        break;
+    case 0x6F7B:
+        *out_ptr = SIM_RSP_SF_6F7B;
+        *out_len = sizeof(SIM_RSP_SF_6F7B) / sizeof(SIM_RSP_SF_6F7B[0]);
+        break;
+    case 0x6F7E:
+        *out_ptr = SIM_RSP_SF_6F7E;
+        *out_len = sizeof(SIM_RSP_SF_6F7E) / sizeof(SIM_RSP_SF_6F7E[0]);
+        break;
+    case 0x6FAD:
+        *out_ptr = SIM_RSP_SF_6FAD;
+        *out_len = sizeof(SIM_RSP_SF_6FAD) / sizeof(SIM_RSP_SF_6FAD[0]);
+        break;
+    case 0x6FAE:
+        *out_ptr = SIM_RSP_SF_6FAE;
+        *out_len = sizeof(SIM_RSP_SF_6FAE) / sizeof(SIM_RSP_SF_6FAE[0]);
+        break;
+    case 0x6FC5:
+        *out_ptr = SIM_RSP_SF_0000;
+        *out_len = sizeof(SIM_RSP_SF_0000) / sizeof(SIM_RSP_SF_0000[0]);
+        break;
+    case 0x6FC6:
+        *out_ptr = SIM_RSP_SF_6FC6;
+        *out_len = sizeof(SIM_RSP_SF_6FC6) / sizeof(SIM_RSP_SF_6FC6[0]);
+        break;
+    case 0x6FCD:
+        *out_ptr = SIM_RSP_SF_6FCD;
+        *out_len = sizeof(SIM_RSP_SF_6FCD) / sizeof(SIM_RSP_SF_6FCD[0]);
+        break;
+    }
+}
+
 void SIM_TIDE_HANDLE(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, int64_t value)
 {
     sim_dev->rx_trigger_count = (value & 0xf) + 1;
@@ -16,14 +169,10 @@ void SIM_TIDE_HANDLE(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, int64_t value)
     {
     case SIM_DEV_EVENT_NONE:
         changeTmp2 = sizeof(SIM_ATR_RSP_DATA) / sizeof(SIM_ATR_RSP_DATA[0]);
-        my_memcpy(sim_dev->rx_buffer, SIM_ATR_RSP_DATA, changeTmp2);
-        sim_dev->rx_buffer_index = 0;
-        sim_dev->rx_current_index = 0;
+        sim_load_rx_fifo(sim_dev, sim_num, SIM_ATR_RSP_DATA, changeTmp2);
         sim_dev->irq_channel = SIM_IRQ_RX;
         sim_dev->irq_start = true;
         sim_dev->event = SIM_DEV_EVENT_CMD;
-        sim_dev->rx_remain_count = 0;
-        uc_mem_write(MTK, sim_num == SIM_CARD_NUM_CARD1 ? SIM1_COUNT : SIM2_COUNT, &(sim_dev->rx_remain_count), 4);
         break;
     default: // 从这里开始考虑走DMA和不走DMA的情况
         sim_dev->rx_current_index = 0;
@@ -44,13 +193,19 @@ void SIM_DATA_HANDLE(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, u8 isWrite, int6
 {
     if (isWrite == 0)
     {
-        changeTmp1 = sim_dev->rx_buffer[sim_dev->rx_buffer_index++];
-        sim_dev->rx_current_index++;
-        sim_dev->rx_remain_count--;
+        if (sim_dev->rx_remain_count > 0)
+        {
+            changeTmp1 = sim_dev->rx_buffer[sim_dev->rx_buffer_index++];
+            sim_dev->rx_current_index++;
+            sim_dev->rx_remain_count--;
+        }
+        else
+            changeTmp1 = 0xff;
         if (sim_num == SIM_CARD_NUM_CARD1)
             uc_mem_write(MTK, SIM1_DATA, &changeTmp1, 4);
         else if (sim_num == SIM_CARD_NUM_CARD2)
             uc_mem_write(MTK, SIM2_DATA, &changeTmp1, 4);
+        sim_write_count_reg(sim_num, sim_dev->rx_remain_count);
     }
     else
     {
@@ -90,6 +245,7 @@ void handle_sim_tx_cmd(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, u32 data_count
         }
         else if (ins == 0xb0 || ins == 0xb2) // READ BINARY / READ RECORD
         {
+            sim_get_selected_file_payload(sim_dev, &sim_dev->T0EndRxDataPtr, &sim_dev->T0EndRxDataLen);
             tmp1 = 0x90;
             tmp2 = 0;
             if (sim_num == SIM_CARD_NUM_CARD1)
@@ -102,11 +258,6 @@ void handle_sim_tx_cmd(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, u32 data_count
                 uc_mem_write(MTK, SIM2_SW1_REG, &tmp1, 4);
                 uc_mem_write(MTK, SIM2_SW2_REG, &tmp2, 4);
             }
-            if (sim_dev->T0EndRxDataPtr == NULL || sim_dev->T0EndRxDataLen == 0)
-            {
-                sim_dev->T0EndRxDataPtr = SIM_RSP_SF_FFFF;
-                sim_dev->T0EndRxDataLen = sizeof(SIM_RSP_SF_FFFF) / sizeof(SIM_RSP_SF_FFFF[0]);
-            }
             sim_dev->irq_channel = SIM_IRQ_T0END;
             sim_dev->irq_start = true;
         }
@@ -114,7 +265,8 @@ void handle_sim_tx_cmd(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, u32 data_count
         {
             tmp1 = 0x90;
             tmp2 = 0;
-            printf("SIM命令:UPDATE RECORD\n");
+            if (MORAL_LOG_SIM_IO)
+                printf("SIM命令:UPDATE RECORD\n");
             if (sim_num == SIM_CARD_NUM_CARD1)
             {
                 uc_mem_write(MTK, SIM1_SW1_REG, &tmp1, 4);
@@ -134,7 +286,8 @@ void handle_sim_tx_cmd(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, u32 data_count
             sim_dev->rx_current_index = 0;
             tmp1 = 0x90;
             tmp2 = 0;
-            printf("未知的GSM命令[%x]\n", ins);
+            if (MORAL_LOG_SIM_IO)
+                printf("未知的GSM命令[%x]\n", ins);
             sim_dev->irq_channel = SIM_IRQ_T0END; // 进入中断使接收命令完成，等待设备开启DMA接收响应数据
             sim_dev->irq_start = true;
         }
@@ -146,7 +299,8 @@ void handle_sim_tx_cmd(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, u32 data_count
         sim_dev->rx_current_index = 0;
         tmp1 = 0;
         tmp2 = 0;
-        printf("未知的GSM协议标准[%x]\n", sim_dev->T0RxData[0]);
+        if (MORAL_LOG_SIM_IO)
+            printf("未知的GSM协议标准[%x]\n", sim_dev->T0RxData[0]);
     }
     // 命令处理完成置0
     sim_dev->tx_buffer_index = 0;
@@ -155,56 +309,68 @@ void handle_sim_tx_cmd(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, u32 data_count
 void handleCmdLogic(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, u32 data_count, u8 isC0Ins)
 {
     u32 tmp1, tmp2;
-    if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_7F20, data_count))
+    u8 *cmd_data = sim_dev->T0RxData;
+    u32 cmd_len = data_count;
+    u8 selected_file_cmd[2];
+
+    if (isC0Ins && cmd_len < 2 && sim_dev->selected_file_id != 0)
+    {
+        selected_file_cmd[0] = (u8)(sim_dev->selected_file_id >> 8);
+        selected_file_cmd[1] = (u8)(sim_dev->selected_file_id & 0xff);
+        cmd_data = selected_file_cmd;
+        cmd_len = 2;
+    }
+
+    if (my_mem_compare(cmd_data, SIM_CMD_SELECT_7F20, cmd_len))
     {
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_7F20) / sizeof(SIM_RSP_SF_7F20[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_7F20;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_7F10, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_7F10, cmd_len))
     {
         tmp1 = 0x90;
         tmp2 = 0;
         // printf("SIM命令:DF_TELECOM\n");
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_2FE2, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_2FE2, cmd_len))
     { // ICCID
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_2FE2) / sizeof(SIM_RSP_SF_2FE2[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_2FE2;
         // printf("SIM命令:EF_ICCID\n");
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_3F00, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_3F00, cmd_len))
     {
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_3F00) / sizeof(SIM_RSP_SF_3F00[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_3F00;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_2F05, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_2F05, cmd_len))
     {
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_2F05) / sizeof(SIM_RSP_SF_2F05[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_2F05;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F05, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F05, cmd_len))
     { // Language indication
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F05) / sizeof(SIM_RSP_SF_6F05[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F05;
         // printf("SIM命令:语言偏好\n");
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6FAE, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6FAE, cmd_len))
     { // Phase identification
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6FAE) / sizeof(SIM_RSP_SF_6FAE[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6FAE;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F16, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F16, cmd_len))
     {
         tmp1 = 0x90;
         tmp2 = 0;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F38, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F38, cmd_len))
     { // SIM service table
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F38) / sizeof(SIM_RSP_SF_6F38[0]);
@@ -212,19 +378,19 @@ void handleCmdLogic(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, u32 data_count, u
         // printf("SIM命令:EF_SST\n");
     }
 
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F07, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F07, cmd_len))
     { // IMSI
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F07) / sizeof(SIM_RSP_SF_6F07[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F07;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F3E, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F3E, cmd_len))
     { // GID1
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_0000) / sizeof(SIM_RSP_SF_0000[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_0000;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F3F, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F3F, cmd_len))
     { // GID2
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_0000) / sizeof(SIM_RSP_SF_0000[0]);
@@ -232,25 +398,25 @@ void handleCmdLogic(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, u32 data_count, u
         // printf("SIM命令:6f3f\n");
     }
 
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F61, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F61, cmd_len))
     {
         tmp1 = 0x90;
         tmp2 = 0;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F62, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F62, cmd_len))
     {
         tmp1 = 0x90;
         tmp2 = 0;
     }
 
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6FAD, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6FAD, cmd_len))
     { // Administrative data
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6FAD) / sizeof(SIM_RSP_SF_6FAD[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6FAD;
     }
 
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F78, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F78, cmd_len))
     {
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F78) / sizeof(SIM_RSP_SF_6F78[0]);
@@ -258,7 +424,7 @@ void handleCmdLogic(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, u32 data_count, u
         // printf("SIM命令:EF_ACC\n");
     }
 
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F14, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F14, cmd_len))
     { // 这个成功后会出现数据账户，包括能进入短信，但无法使用功能
         // EF_CPHS_INFO_ID)CMCC
         tmp1 = 0x9f;
@@ -266,107 +432,107 @@ void handleCmdLogic(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, u32 data_count, u
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F14;
         // printf("SIM命令:6F14\n");
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F17, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F17, cmd_len))
     {
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_0000) / sizeof(SIM_RSP_SF_0000[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_0000;
     }
 
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F7E, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F7E, cmd_len))
     { // Location information
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F7E) / sizeof(SIM_RSP_SF_6F7E[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F7E;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F3C, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F3C, cmd_len))
     { // Short messages
         tmp1 = 0x90;
         tmp2 = 0;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F52, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F52, cmd_len))
     { // EF_KcGPRS
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F52) / sizeof(SIM_RSP_SF_6F52[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F52;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F53, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F53, cmd_len))
     { // EF_LOCIGPRS
         tmp1 = 0x94;
         tmp2 = 0x04;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F30, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F30, cmd_len))
     { // PLMN selector
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F30) / sizeof(SIM_RSP_SF_6F30[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F30;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F31, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F31, cmd_len))
     { // EF_HPLMN 控制是否重选 Home PLMN。
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F31) / sizeof(SIM_RSP_SF_6F31[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F31;
     }
 
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F7B, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F7B, cmd_len))
     { // EF_FPLMN
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F7B) / sizeof(SIM_RSP_SF_6F7B[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F7B;
     }
 
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F3A, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F3A, cmd_len))
     { // Abbreviated dialling numbers
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F3A) / sizeof(SIM_RSP_SF_6F3A[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F3A;
     }
 
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F13, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F13, cmd_len))
     {
         tmp1 = 0x9e;
         tmp2 = 0;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6FC6, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6FC6, cmd_len))
     {
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6FC6) / sizeof(SIM_RSP_SF_6FC6[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6FC6;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6FCD, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6FCD, cmd_len))
     {
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6FCD) / sizeof(SIM_RSP_SF_6FCD[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6FCD;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6FC5, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6FC5, cmd_len))
     {
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_0000) / sizeof(SIM_RSP_SF_0000[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_0000;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F40, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F40, cmd_len))
     { // MSISDN 用户电话号码（显示用，非注册过程必需）。
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F40) / sizeof(SIM_RSP_SF_6F40[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F40;
     }
 
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F44, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F44, cmd_len))
     { // EF_LND
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F44) / sizeof(SIM_RSP_SF_6F44[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F44;
     }
 
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F43, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F43, cmd_len))
     { // EF_SMSS
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F43) / sizeof(SIM_RSP_SF_6F43[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F43;
     }
 
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F42, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F42, cmd_len))
     { // SMS parameters
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F42) / sizeof(SIM_RSP_SF_6F42[0]);
@@ -374,7 +540,7 @@ void handleCmdLogic(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, u32 data_count, u
         // printf("SIM命令:6F42\n");
     }
 
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F3B, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F3B, cmd_len))
     { // Fixed dialing numbers
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_0000) / sizeof(SIM_RSP_SF_0000[0]);
@@ -382,93 +548,93 @@ void handleCmdLogic(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, u32 data_count, u
         // printf("SIM命令:6F3B\n");
     }
 
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F4A, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F4A, cmd_len))
     { // Extension 1
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F4A) / sizeof(SIM_RSP_SF_6F4A[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F4A;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F4B, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F4B, cmd_len))
     { // Extension 2
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F4B) / sizeof(SIM_RSP_SF_6F4B[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F4B;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F4C, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F4C, cmd_len))
     { // Extension 3
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_0000) / sizeof(SIM_RSP_SF_0000[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_0000;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F46, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F46, cmd_len))
     { // Service provider name
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F46) / sizeof(SIM_RSP_SF_6F46[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F46;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F74, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F74, cmd_len))
     { // BCCH
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F74) / sizeof(SIM_RSP_SF_6F74[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F74;
     }
 
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F20, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F20, cmd_len))
     { // EF_Kc
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F20) / sizeof(SIM_RSP_SF_6F20[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F20;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F60, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F60, cmd_len))
     { // EF_PLMNwACT_ID
         tmp1 = 0x9e;
         tmp2 = 0;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F61, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F61, cmd_len))
     { // EF_OPLMNwACT_ID 	运营商定义的 PLMN 优先列表（可选）。
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F30) / sizeof(SIM_RSP_SF_6F30[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F30;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6FB7, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6FB7, cmd_len))
     {
         tmp1 = 0x9e;
         tmp2 = 0;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F49, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F49, cmd_len))
     { // Service dialing numbers
         tmp1 = 0x90;
         tmp2 = 0;
     }
 
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F41, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F41, cmd_len))
     { // EF_PUCT
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F41) / sizeof(SIM_RSP_SF_6F41[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F41;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F19, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F19, cmd_len))
     {
         tmp1 = 0x90;
         tmp2 = 0;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F45, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F45, cmd_len))
     {
         tmp1 = 0x9f;
         tmp2 = sizeof(SIM_RSP_SF_6F45) / sizeof(SIM_RSP_SF_6F45[0]);
         sim_dev->T0EndRxDataPtr = SIM_RSP_SF_6F45;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F11, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F11, cmd_len))
     {
         tmp1 = 0x9e;
         tmp2 = 0;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F50, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F50, cmd_len))
     {
         tmp1 = 0x9e;
         tmp2 = 0;
     }
-    else if (my_mem_compare(sim_dev->T0RxData, SIM_CMD_SELECT_6F48, data_count))
+    else if (my_mem_compare(cmd_data, SIM_CMD_SELECT_6F48, cmd_len))
     { // EF_CBMID
         tmp1 = 0x9e;
         tmp2 = 0;
@@ -478,7 +644,8 @@ void handleCmdLogic(VM_SIM_DEV *sim_dev, SIM_CARD_NUM sim_num, u32 data_count, u
     {
         tmp1 = 0x9e;
         tmp2 = 0;
-        printf("SIM[%d]未处理的SELECT命令[%x %x]\n", sim_num, sim_dev->T0RxData[0], sim_dev->T0RxData[1]);
+        if (MORAL_LOG_SIM_IO)
+            printf("SIM[%d]未处理的SELECT命令[%x %x]\n", sim_num, cmd_data[0], cmd_data[1]);
     }
 
     if (sim_num == SIM_CARD_NUM_CARD1)
@@ -737,13 +904,25 @@ void InitSimCardRegs()
 {
     u32 inserted = 1;
     u32 card_type = 0x100;
+    u32 sim_status = 0x03;
+    u32 imp3_ready = 0;
+    u32 retry = 0;
+    u32 tout = 0xffff;
 
     uc_mem_write(MTK, SIM1_INS_REG, &inserted, 4);
     uc_mem_write(MTK, SIM2_INS_REG, &inserted, 4);
-    uc_mem_write(MTK, SIM1_STATUS_REG, &inserted, 4);
-    uc_mem_write(MTK, SIM2_STATUS_REG, &inserted, 4);
+    uc_mem_write(MTK, SIM1_STATUS_REG, &sim_status, 4);
+    uc_mem_write(MTK, SIM2_STATUS_REG, &sim_status, 4);
     uc_mem_write(MTK, SIM1_CARD_TYPE_REG, &card_type, 4);
     uc_mem_write(MTK, SIM2_CARD_TYPE_REG, &card_type, 4);
+    uc_mem_write(MTK, SIM1_IMP3_REG, &imp3_ready, 4);
+    uc_mem_write(MTK, SIM2_IMP3_REG, &imp3_ready, 4);
+    uc_mem_write(MTK, SIM1_RETRY, &retry, 4);
+    uc_mem_write(MTK, SIM2_RETRY, &retry, 4);
+    uc_mem_write(MTK, SIM1_TOUT, &tout, 4);
+    uc_mem_write(MTK, SIM2_TOUT, &tout, 4);
+    sim_write_count_reg(SIM_CARD_NUM_CARD1, 0);
+    sim_write_count_reg(SIM_CARD_NUM_CARD2, 0);
 }
 void SimTaskMain()
 {

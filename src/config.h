@@ -58,6 +58,14 @@
 #define MORAL_LOG_SD_IO 0
 #endif
 
+#ifndef MORAL_LOG_TOUCH_DEBUG
+#define MORAL_LOG_TOUCH_DEBUG 0
+#endif
+
+#ifndef MORAL_LOG_SIM_IO
+#define MORAL_LOG_SIM_IO 0
+#endif
+
 #ifndef MORAL_SD_WRITE_FLUSH_EVERY
 #define MORAL_SD_WRITE_FLUSH_EVERY 16
 #endif

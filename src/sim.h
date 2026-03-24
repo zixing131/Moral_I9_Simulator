@@ -13,7 +13,7 @@
 #define SIM1_CONF (SIM1_BASE + 0x4)
 #define SIM1_IRQ_ENABLE (SIM1_BASE + 0x10)
 #define SIM1_IRQ_STATUS (SIM1_BASE + 0x14) // SIM_INS
-#define SIM1_RETRY (SIM1_BASE + 0x20)
+#define SIM2_RETRY (SIM2_BASE + 0x20)
 #define SIM1_TIDE (SIM1_BASE + 0x24) // 低8位全部置0表示RX_IDE，第二个字节的低8位全部置0表示TX_IDE
 #define SIM1_DATA (SIM1_BASE + 0x30)
 #define SIM1_COUNT (SIM1_BASE + 0x34)
@@ -132,7 +132,7 @@ void SimTaskMain();
 void InitSimCard();
 void InitSimCardRegs();
 
-u8 SIM_ATR_RSP_DATA[] = {0x3b, 0x00};
+u8 SIM_ATR_RSP_DATA[] = {0x3b, 0x9f, 0x95, 0x80, 0x1f, 0xc7, 0x80, 0x31, 0xe0, 0x73, 0xfe, 0x21, 0x1b, 0x64, 0x00, 0x00, 0x90, 0x00};
 
 u8 SIM_CMD_SELECT[] = {0xa0, 0xa4, 0x00, 0x00, 0x02}; // 选择文件命令
 
