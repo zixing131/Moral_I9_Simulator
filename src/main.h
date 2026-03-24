@@ -97,6 +97,15 @@ u32 halTimerIntStatus = 1;
 u32 halTimerOutLength = 0;
 u32 FICE_Status = 0;
 extern u32 g_sd_dma_phys_addr;
+u32 Perf_EventEnqueueCount;
+u32 Perf_EventDequeueCount;
+u32 Perf_EventDropCount;
+u32 Perf_EventCoalesceCount;
+u32 Perf_EventQueueHighWater;
+u32 Perf_IrqInjectCount;
+u32 Perf_LcdRefreshCount;
+u32 Perf_SdReadOps;
+u32 Perf_SdWriteOps;
 u32 IRQ_MASK_SET_L_Data;
 u32 IRQ_MASK_SET_H_Data;
 

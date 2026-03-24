@@ -36,6 +36,51 @@ static inline u32 vm_event_queue_index(u32 offset)
     return (VmEventHead + offset) % MAX_VM_EVENT_COUNT;
 }
 
+static u8 vm_event_should_coalesce(u32 event)
+{
+    switch (event)
+    {
+    case VM_EVENT_RTC_IRQ:
+    case VM_EVENT_GPT_IRQ:
+    case VM_EVENT_SIM_IRQ:
+    case VM_EVENT_SIM_T0_TX_END:
+    case VM_EVENT_SIM_T0_RX_END:
+    case VM_EVENT_DMA_IRQ:
+    case VM_EVENT_MSDC_IRQ:
+    case VM_EVENT_LCD_IRQ:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static u8 vm_event_queue_contains_exact(u32 event, u32 r0, u32 r1)
+{
+    u32 i;
+    for (i = 0; i < VmEventCount; i++)
+    {
+        vm_event *evt = &VmEventHandleList[vm_event_queue_index(i)];
+        if (evt->event == event && evt->r0 == r0 && evt->r1 == r1)
+            return 1;
+    }
+    for (i = 0; i < VmEventWaitCount; i++)
+    {
+        vm_event *evt = &VmEventHandleWaitList[i];
+        if (evt->event == event && evt->r0 == r0 && evt->r1 == r1)
+            return 1;
+    }
+    if (pending_touch_active && pending_touch_evt.event == event &&
+        pending_touch_evt.r0 == r0 && pending_touch_evt.r1 == r1)
+        return 1;
+    return 0;
+}
+
+static void vm_event_note_depth(void)
+{
+    if (VmEventCount > Perf_EventQueueHighWater)
+        Perf_EventQueueHighWater = VmEventCount;
+}
+
 static inline void vm_event_queue_push_back(vm_event evt)
 {
     VmEventHandleList[vm_event_queue_index(VmEventCount)] = evt;
@@ -92,6 +137,11 @@ void InitVmEvent()
 int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
 {
     u32 i;
+    if (vm_event_should_coalesce(event) && vm_event_queue_contains_exact(event, r0, r1))
+    {
+        Perf_EventCoalesceCount++;
+        return 1;
+    }
     if (VmEventCount < MAX_VM_EVENT_COUNT)
     {
         if (vmIsLock == 0)
@@ -105,6 +155,8 @@ int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
                 if (VmEventHandleWaitList[i].event == VM_EVENT_TOUCH_SCREEN_IRQ)
                     touch_irq_pending = 1;
                 vm_event_queue_push_back(VmEventHandleWaitList[i]);
+                Perf_EventEnqueueCount++;
+                vm_event_note_depth();
             }
             if (i < VmEventWaitCount)
             {
@@ -126,6 +178,8 @@ int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
                 evt.r0 = r0;
                 evt.r1 = r1;
                 vm_event_queue_push_back(evt);
+                Perf_EventEnqueueCount++;
+                vm_event_note_depth();
                 enqueued = 1;
                 if (event == VM_EVENT_TOUCH_SCREEN_IRQ)
                     touch_irq_pending = 1;
@@ -141,17 +195,22 @@ int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
                 evt->event = event;
                 evt->r0 = r0;
                 evt->r1 = r1;
+                Perf_EventEnqueueCount++;
                 if (event == VM_EVENT_TOUCH_SCREEN_IRQ)
                     touch_irq_pending = 1;
             }
             else
+            {
+                Perf_EventDropCount++;
                 printf("WARNING:Max VmEventWaitCount\n");
+            }
         }
         return 1;
     }
 #ifdef sGDB_SERVER_SUPPORT
     else
     {
+        Perf_EventDropCount++;
         printf("max vm event count\n");
         uc_emu_stop(MTK);
         isBreakPointHit = 1;
@@ -173,6 +232,7 @@ inline vm_event *DequeueVMEvent()
         evt = &currentEvent;
         --VmEventCount;
         VmEventHead = (VmEventHead + 1) % MAX_VM_EVENT_COUNT;
+        Perf_EventDequeueCount++;
         if (VmEventCount == 0)
             VmEventHead = 0;
         vmIsLock = 0;

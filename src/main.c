@@ -517,6 +517,74 @@ int writeFile(const char *filename, void *buff, u32 size)
     fclose(file);
     return result;
 }
+
+static FILE *open_sd_image_with_fallback(const char **opened_path)
+{
+    static char resolved_path[512];
+    static const char *relative_candidates[] = {
+        "Rom\\fat32.img",
+        "Rom\\fat32-bk.img",
+        "Rom\\FatImage.fat",
+    };
+    static const char *cwd_candidates[] = {
+        SD_CARD_IMG_PATH,
+        "Rom\\fat32-bk.img",
+        "Rom\\FatImage.fat",
+        "bin\\Rom\\fat32.img",
+        "bin\\Rom\\fat32-bk.img",
+        "bin\\Rom\\FatImage.fat",
+    };
+    char *base_path;
+    u32 i;
+
+    if (opened_path != NULL)
+        *opened_path = NULL;
+
+    base_path = SDL_GetBasePath();
+    if (base_path != NULL)
+    {
+        for (i = 0; i < (sizeof(relative_candidates) / sizeof(relative_candidates[0])); i++)
+        {
+            FILE *fp;
+            snprintf(resolved_path, sizeof(resolved_path), "%s%s", base_path, relative_candidates[i]);
+            fp = fopen(resolved_path, "r+b");
+            if (fp == NULL)
+                fp = fopen(resolved_path, "rb");
+            if (fp != NULL)
+            {
+                if (opened_path != NULL)
+                    *opened_path = resolved_path;
+                SDL_free(base_path);
+                return fp;
+            }
+        }
+        SDL_free(base_path);
+    }
+
+    for (i = 0; i < (sizeof(cwd_candidates) / sizeof(cwd_candidates[0])); i++)
+    {
+        FILE *fp = fopen(cwd_candidates[i], "r+b");
+        if (fp != NULL)
+        {
+            if (opened_path != NULL)
+                *opened_path = cwd_candidates[i];
+            return fp;
+        }
+    }
+
+    for (i = 0; i < (sizeof(cwd_candidates) / sizeof(cwd_candidates[0])); i++)
+    {
+        FILE *fp = fopen(cwd_candidates[i], "rb");
+        if (fp != NULL)
+        {
+            if (opened_path != NULL)
+                *opened_path = cwd_candidates[i];
+            return fp;
+        }
+    }
+
+    return NULL;
+}
 /* SD 镜像可能 >2GB 或扇区偏移*512 超过 32 位；Win 上用 _fseeki64 */
 static int sd_img_fseek_set(FILE *fp, unsigned long long pos)
 {
@@ -713,7 +781,9 @@ u8 *readSDFile(unsigned long long startPos, u32 size)
     my_memset(tmp, 0, size);
     {
         unsigned long long fsize = 0;
-        if (sd_img_get_file_size(SD_File_Handle, &fsize) != 0)
+        if (g_sd_img_max_bytes != 0ULL)
+            fsize = g_sd_img_max_bytes;
+        else if (sd_img_get_file_size(SD_File_Handle, &fsize) != 0)
         {
             printf("读取SD卡：无法取得镜像大小\n");
             SDL_free(tmp);
@@ -757,50 +827,119 @@ u8 *readSDFile(unsigned long long startPos, u32 size)
             }
         }
     }
+    Perf_SdReadOps++;
     return tmp;
 }
 
 bool writeSDFile(u8 *Buffer, unsigned long long startPos, u32 size)
 {
     u8 flag;
+    unsigned long long limit_bytes = g_sd_img_max_bytes;
+    u32 write_size = size;
     if (SD_File_Handle == NULL)
     {
         return false;
     }
+    if (limit_bytes == 0ULL)
+        limit_bytes = 1ULL * 1024 * 1024 * 1024;
     {
-        unsigned long long max_allowed = 1ULL * 1024 * 1024 * 1024; /* 1 GB 硬上限 */
-        if (startPos + size > max_allowed)
+        if (startPos >= limit_bytes)
         {
             static u32 sd_bigwr_log;
             if (sd_bigwr_log < 8u)
             {
                 sd_bigwr_log++;
-                printf("[SD] 写入超出1GB上限(跳过): offset=%llu len=%u\n",
-                       (unsigned long long)startPos, (unsigned)size);
+                printf("[SD] 写入越界(跳过): offset=%llu len=%u limit=%llu\n",
+                       (unsigned long long)startPos, (unsigned)size, limit_bytes);
             }
             return false;
         }
+        if (startPos + (unsigned long long)write_size > limit_bytes)
+        {
+            static u32 sd_partial_log;
+            write_size = (u32)(limit_bytes - startPos);
+            if (sd_partial_log < 8u)
+            {
+                sd_partial_log++;
+                printf("[SD] 写入部分越界: offset=%llu 请求=%u 实际=%u limit=%llu\n",
+                       (unsigned long long)startPos, (unsigned)size, (unsigned)write_size, limit_bytes);
+            }
+        }
     }
+    if (write_size == 0)
+        return false;
     if (sd_img_fseek_set(SD_File_Handle, startPos) != 0)
     {
         printf("移动文件指针失败\n");
         return false;
     }
-    size_t result = fwrite(Buffer, 1, size, SD_File_Handle);
-    if (result != size)
+    size_t result = fwrite(Buffer, 1, write_size, SD_File_Handle);
+    if (result != write_size)
     {
         printf("写入文件失败\n");
         return false;
     }
-    fflush(SD_File_Handle);
+    {
+        static u32 sd_flush_counter;
+        sd_flush_counter++;
+        if (MORAL_SD_WRITE_FLUSH_EVERY <= 1 || (sd_flush_counter % MORAL_SD_WRITE_FLUSH_EVERY) == 0)
+            fflush(SD_File_Handle);
+    }
     {
         static u32 sd_wr_ok_log;
-        if (sd_wr_ok_log < 30u || (sd_wr_ok_log % 100) == 0)
+        if (MORAL_LOG_SD_IO && (sd_wr_ok_log < 30u || (sd_wr_ok_log % 100) == 0))
             printf("[SD-WR] ok offset=%llu len=%u (#%u)\n",
-                   (unsigned long long)startPos, (unsigned)size, sd_wr_ok_log);
+                   (unsigned long long)startPos, (unsigned)write_size, sd_wr_ok_log);
         sd_wr_ok_log++;
     }
+    Perf_SdWriteOps++;
     return true;
+}
+
+static void moral_perf_tick(void)
+{
+#if MORAL_PERF_STATS_INTERVAL_MS > 0
+    static uint64_t last_perf_tick = 0;
+    static u32 last_enqueue = 0;
+    static u32 last_dequeue = 0;
+    static u32 last_drop = 0;
+    static u32 last_coalesce = 0;
+    static u32 last_irq = 0;
+    static u32 last_lcd = 0;
+    static u32 last_sd_read = 0;
+    static u32 last_sd_write = 0;
+    uint64_t interval = (uint64_t)MORAL_PERF_STATS_INTERVAL_MS;
+
+    if (last_perf_tick == 0)
+    {
+        last_perf_tick = currentTime;
+        return;
+    }
+    if ((currentTime - last_perf_tick) < interval)
+        return;
+
+    printf("[perf] queue=%u high=%u enq=+%u deq=+%u drop=+%u coal=+%u irq=+%u lcd=+%u sd_r=+%u sd_w=+%u\n",
+           VmEventCount,
+           Perf_EventQueueHighWater,
+           Perf_EventEnqueueCount - last_enqueue,
+           Perf_EventDequeueCount - last_dequeue,
+           Perf_EventDropCount - last_drop,
+           Perf_EventCoalesceCount - last_coalesce,
+           Perf_IrqInjectCount - last_irq,
+           Perf_LcdRefreshCount - last_lcd,
+           Perf_SdReadOps - last_sd_read,
+           Perf_SdWriteOps - last_sd_write);
+
+    last_perf_tick = currentTime;
+    last_enqueue = Perf_EventEnqueueCount;
+    last_dequeue = Perf_EventDequeueCount;
+    last_drop = Perf_EventDropCount;
+    last_coalesce = Perf_EventCoalesceCount;
+    last_irq = Perf_IrqInjectCount;
+    last_lcd = Perf_LcdRefreshCount;
+    last_sd_read = Perf_SdReadOps;
+    last_sd_write = Perf_SdWriteOps;
+#endif
 }
 
 /* 线性固件：[0, GUEST_LOW_IMAGE_MAP_SIZE)→低映射；超出写入 GUEST_IDA_XRAM_BASE（与原先连续 16MB 布局一致） */
@@ -1005,6 +1144,7 @@ void initMtkSimalator()
             return NULL;
         }
         printf("[mem] Mapped 0x81000000..0x83000000 (RTC / AUX / GPT / legacy IRQ regs)\n");
+        InitSimCardRegs();
     }
     /* 只对需要 hook 的地址范围注册 UC_HOOK_CODE，避免每条指令都调用回调 */
     {
@@ -1293,6 +1433,8 @@ void MainUpdateTask()
 #endif
         lcdTaskMain();
         RtcTaskMain();
+        GptTaskMain();
+        SimTaskMain();
         if (currentTime > last_gpt1_interrupt_time)
         {
             last_gpt1_interrupt_time = currentTime + 1;
@@ -1317,6 +1459,8 @@ void MainUpdateTask()
             lastFlashTime = currentTime + 300;
             fflush(stdout);
         }
+
+        moral_perf_tick();
 
         usleep(1000);
     }
@@ -1447,7 +1591,12 @@ int main(int argc, char *args[])
         }
 
         g_sd_img_max_bytes = 0;
-        SD_File_Handle = fopen(SD_CARD_IMG_PATH, "r+b");
+        {
+            const char *sd_img_path = NULL;
+            SD_File_Handle = open_sd_image_with_fallback(&sd_img_path);
+            if (SD_File_Handle != NULL && sd_img_path != NULL)
+                printf("[SD] 使用镜像文件: %s\n", sd_img_path);
+        }
         if (SD_File_Handle == NULL)
             printf("没有SD卡镜像文件，跳过加载\n");
         else
@@ -1780,14 +1929,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     {
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp1);
         g_sd_dma_phys_addr = tmp1;
-        printf("[STG_R_HOOK] a4(phys)=0x%08x\n", tmp1);
+        if (MORAL_LOG_SD_IO)
+            printf("[STG_R_HOOK] a4(phys)=0x%08x\n", tmp1);
         break;
     }
     case 0x336C2: /* MDrvFCIEStorageW 入口 — 保存 a4（写操作 DMA 物理地址） */
     {
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp1);
         g_sd_dma_phys_addr = tmp1;
-        printf("[STG_W_HOOK] a4(phys)=0x%08x\n", tmp1);
+        if (MORAL_LOG_SD_IO)
+            printf("[STG_W_HOOK] a4(phys)=0x%08x\n", tmp1);
         break;
     }
     case 0x40ED0: /* Drv_DoDataCompare — 跳过写后数据比较验证，直接返回 0（成功） */
@@ -2086,7 +2237,8 @@ bool StartInterrupt(u32 irq_line, u32 lastAddr)
             uc_reg_write(MTK, UC_ARM_REG_PC, &Interrupt_Handler_Entry);
 
             irq_inject_count++;
-            if (irq_inject_count <= 20 || (irq_inject_count % 500) == 0)
+            Perf_IrqInjectCount++;
+            if (MORAL_LOG_HOT_PATH && (irq_inject_count <= 20 || (irq_inject_count % 500) == 0))
                 printf("[IRQ] #%u line=%u pc=0x%x lr=0x%x thumb=%u mode=0x%x\n",
                        irq_inject_count, irq_line, lastAddr, lastAddr + 4, thumb ? 1 : 0, cur_mode);
             return true;

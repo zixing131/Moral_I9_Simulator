@@ -417,8 +417,9 @@ void de_emulator_periodic_refresh(void)
 
     de_blit_from(Lcd_Periodic_Buffer, 0, 0, DE_PANEL_W, DE_PANEL_H, DE_PANEL_W * DE_BPP);
     Lcd_Need_Update = 1;
+    Perf_LcdRefreshCount++;
     de_periodic_call_cnt++;
-    if (de_periodic_call_cnt <= 5 || (de_periodic_call_cnt % 200) == 0)
+    if (MORAL_LOG_HOT_PATH && (de_periodic_call_cnt <= 5 || (de_periodic_call_cnt % 200) == 0))
         printf("[LCD-REFRESH] periodic #%u buf=0x%x\n", de_periodic_call_cnt, srcBuf);
 }
 
@@ -590,7 +591,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         {
             static u32 fmt_cnt = 0;
             fmt_cnt++;
-            if (fmt_cnt <= 10)
+            if (MORAL_LOG_HOT_PATH && fmt_cnt <= 10)
                 printf("[lcd]buff_format[%x] #%u\n", (u32)value, fmt_cnt);
         }
         break;
@@ -599,7 +600,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         {
             static u32 layer_sel_cnt = 0;
             layer_sel_cnt++;
-            if (layer_sel_cnt <= 10 || (layer_sel_cnt % 500) == 0)
+            if (MORAL_LOG_HOT_PATH && (layer_sel_cnt <= 10 || (layer_sel_cnt % 500) == 0))
                 printf("[lcd]layer_sel[%x] #%u\n", (u32)value, layer_sel_cnt);
         }
         break;
@@ -708,7 +709,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             if (pitch == 0u)
                 pitch = (u32)w * DE_BPP;
 
-            if (de_trigger_cnt <= 20 || (de_trigger_cnt % 100) == 0)
+            if (MORAL_LOG_HOT_PATH && (de_trigger_cnt <= 20 || (de_trigger_cnt % 100) == 0))
             {
                 printf("[DE-trigger] #%u buf=0x%x pitch=%u w=%u h=%u\n",
                        de_trigger_cnt, srcBuf, pitch, w, h);
@@ -746,6 +747,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                         de_resolve_blit_dest(srcBuf, &dstX, &dstY);
                         de_blit_to_sdl(dstX, dstY, w, h, (u32)w * DE_BPP);
                         Lcd_Need_Update = 1;
+                        Perf_LcdRefreshCount++;
                     }
                 }
 
@@ -760,6 +762,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                     de_resolve_blit_dest(srcBuf, &dstX, &dstY);
                     de_blit_to_sdl(dstX, dstY, w, h, (u32)w * DE_BPP);
                     Lcd_Need_Update = 1;
+                    Perf_LcdRefreshCount++;
                     De_LastTriggerTime = moral_get_ticks_ms();
                     if (w >= (DE_PANEL_W - 20u) && h >= (DE_PANEL_H - 80u))
                     {
@@ -784,7 +787,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             {
                 static u32 fmark_clear_cnt = 0;
                 fmark_clear_cnt++;
-                if (fmark_clear_cnt <= 10)
+                if (MORAL_LOG_HOT_PATH && fmark_clear_cnt <= 10)
                     printf("[FMark-clear] #%u pc=0x%x %s\n", fmark_clear_cnt, pc_val,
                            is_reset ? "(HalDispReset)" : "(SWFMark)");
                 tmp = 0xF00;
@@ -794,7 +797,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
 
             static u32 fmark_trigger_cnt = 0;
             fmark_trigger_cnt++;
-            if (fmark_trigger_cnt <= 20 || (fmark_trigger_cnt % 100) == 0)
+            if (MORAL_LOG_HOT_PATH && (fmark_trigger_cnt <= 20 || (fmark_trigger_cnt % 100) == 0))
             {
                 printf("[FMark-trigger] #%u pc=0x%x %s\n", fmark_trigger_cnt, pc_val,
                        is_reset ? "(HalDispReset)" : "(SWFMark)");
@@ -1409,14 +1412,15 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                     dma_addr = miu_addr + 0xC000000;
                 else
                     dma_addr = 0xC000000;  /* 最后回退，实际上不应出现 */
-                u32 sector_addr = p[1] | (p[2] << 16);
+                u32 sector_addr = p[1];
                 blk_cnt &= 0xfff;
                 if (blk_cnt == 0)
                     blk_cnt = 1;
                 u32 byte_count = blk_cnt * 512;
                 unsigned long long file_offset = (unsigned long long)sector_addr * 512ULL;
-                printf("[SD-CMD17/18] sector=%u blk=%u miu=0x%08x dma=0x%08x\n",
-                       sector_addr, blk_cnt, miu_addr, dma_addr);
+                  if (MORAL_LOG_SD_IO)
+                      printf("[SD-CMD17/18] sector=%u blk=%u miu=0x%08x dma=0x%08x\n",
+                          sector_addr, blk_cnt, miu_addr, dma_addr);
                 u8 *buf = readSDFile(file_offset, byte_count);
                 if (buf != NULL)
                 {
@@ -1438,7 +1442,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 u32 dma_addr = (g_sd_dma_phys_addr != 0)
                                    ? g_sd_dma_phys_addr
                                    : (miu_addr_wr_val != 0 ? miu_addr_wr_val + 0xC000000 : 0xC000000);
-                u32 sector_addr = p[1] | (p[2] << 16);
+                u32 sector_addr = p[1];
                 blk_cnt &= 0xfff;
                 if (blk_cnt == 0)
                     blk_cnt = 1;
@@ -1453,8 +1457,9 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 }
                 SD_CMD_RSP_Buff[0] = 0xdede0000;
                 SD_CMD_RSP_Buff[1] = 0xdede0900;
-                printf("[SD-CMD24/25] sector=%u blk=%u dma=0x%08x\n",
-                       sector_addr, blk_cnt, dma_addr);
+                  if (MORAL_LOG_SD_IO)
+                      printf("[SD-CMD24/25] sector=%u blk=%u dma=0x%08x\n",
+                          sector_addr, blk_cnt, dma_addr);
             }
             else if ((p[0] & 0x3f) == 0x0c)
             {

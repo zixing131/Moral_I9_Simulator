@@ -116,6 +116,8 @@ typedef struct VM_SIM_DEV_
     u32 rx_trigger_count;
     u32 tx_trigger_count;
     u8 *T0EndRxDataPtr;
+    u32 T0EndRxDataLen;
+    u16 selected_file_id;
 } VM_SIM_DEV;
 
 typedef enum
@@ -128,6 +130,7 @@ void handleSimVmEvent(vm_event *vmEvent, uint64_t address);
 void handleSimDevReg(uint64_t address, u32 data, uint64_t value);
 void SimTaskMain();
 void InitSimCard();
+void InitSimCardRegs();
 
 u8 SIM_ATR_RSP_DATA[] = {0x3b, 0x00};
 
