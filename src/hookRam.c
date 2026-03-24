@@ -26,13 +26,95 @@ static void nand_nc_read_page_sectors_contig(nandPage2048 *p, u32 dmaPtr, u32 fi
     uc_mem_write(MTK, FCIE_NC_RBUF_CIFD_BASE, nandSpareBuff, 32u * sectorCount);
 }
 
+static void nand_nc_write_page_sectors_contig(nandPage2048 *p, u32 dmaPtr, u32 firstSector, u32 sectorCount)
+{
+    u32 byteOff;
+    if (firstSector > 3u || sectorCount < 1u || sectorCount > 4u || firstSector + sectorCount > 4u)
+        return;
+    byteOff = firstSector * 512u;
+    uc_mem_read(MTK, dmaPtr, p->pageBuff + byteOff, 512u * sectorCount);
+}
+
+static u8 nand_nc_try_decode_sector_offset(u32 sectorInPage, u32 *firstSector)
+{
+    if (firstSector == NULL)
+        return 0;
+
+    if (sectorInPage <= 3u)
+    {
+        *firstSector = sectorInPage;
+        return 1;
+    }
+
+    if ((sectorInPage % 512u) == 0u)
+    {
+        u32 sectorIdx = sectorInPage / 512u;
+        if (sectorIdx < 4u)
+        {
+            *firstSector = sectorIdx;
+            return 1;
+        }
+    }
+
+    if ((sectorInPage % 256u) == 0u)
+    {
+        u32 sectorIdx = sectorInPage / 256u;
+        if (sectorIdx < 4u)
+        {
+            *firstSector = sectorIdx;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static u8 nand_nc_resolve_sector_window(u32 paramSect, u32 sectorInPage, u32 *firstSector, u32 *sectorCount)
+{
+    u32 fs = 0u;
+    u32 ns = 0u;
+    u32 low = paramSect & 0x7Fu;
+    u32 high = paramSect >> 7;
+
+    if (high <= 3u && low >= 1u && low <= 7u && (low & 1u) == 1u)
+    {
+        /* 常见编码：0x01/0x03/0x05... 表示连续 1/2/3... 个 sector，
+         * 0x80/0x100/0x180 为 page 内 sector 起点偏移。示例：0x83 => sector1 开始读/写 2 个 sector。 */
+        fs = high;
+        ns = (low + 1u) / 2u;
+    }
+    else
+    {
+        nand_nc_try_decode_sector_offset(sectorInPage, &fs);
+        if (paramSect >= 1u && paramSect <= 4u)
+            ns = paramSect;
+        else if ((paramSect & 0xFFu) >= 1u && (paramSect & 0xFFu) <= 4u)
+            ns = paramSect & 0xFFu;
+    }
+
+    if (fs >= 4u)
+        return 0;
+    if (ns == 0u)
+        ns = 1u;
+    if (fs + ns > 4u)
+        ns = 4u - fs;
+    if (ns == 0u)
+        return 0;
+
+    if (firstSector != NULL)
+        *firstSector = fs;
+    if (sectorCount != NULL)
+        *sectorCount = ns;
+    return 1;
+}
+
 u32 halTimerCnt = 0;              // HalTimerUDelay调用
 u32 halTimerCntMax = 0;           // HalTimerUDelay调用
 u32 DrvTimerStdaTimerGetTick = 0; // DrvTimerStdaTimerGetTick
 
 u8 de_small_pending = 0;
 
-static clock_t cursor_de_last_draw = 0;
+static uint64_t cursor_de_last_draw = 0;
 
 u8 SPI_CMD_Buf[256];
 u32 SPI_CMD_Buf_Idx = 0;
@@ -305,8 +387,8 @@ void de_emulator_periodic_refresh(void)
     if (!De_PeriodicRefreshAllowed)
         return;
 
-    clock_t now = clock();
-    clock_t idle_threshold = (clock_t)(100 * CLOCKS_PER_SEC / 1000);
+    uint64_t now = moral_get_ticks_ms();
+    uint64_t idle_threshold = 100;
     if (De_LastTriggerTime != 0 && (now - De_LastTriggerTime) < idle_threshold)
         return;
 
@@ -649,8 +731,8 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
 
             if (is_cursor_de)
             {
-                clock_t now = clock();
-                clock_t min_interval = (clock_t)(CLOCKS_PER_SEC / 60);
+                uint64_t now = moral_get_ticks_ms();
+                uint64_t min_interval = 1000 / 60;
                 if (min_interval < 1)
                     min_interval = 1;
 
@@ -678,7 +760,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                     de_resolve_blit_dest(srcBuf, &dstX, &dstY);
                     de_blit_to_sdl(dstX, dstY, w, h, (u32)w * DE_BPP);
                     Lcd_Need_Update = 1;
-                    De_LastTriggerTime = clock();
+                    De_LastTriggerTime = moral_get_ticks_ms();
                     if (w >= (DE_PANEL_W - 20u) && h >= (DE_PANEL_H - 80u))
                     {
                         Lcd_FullScreen_Ptr = srcBuf;
@@ -966,7 +1048,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 u16 SectorInPage = nandFlashCMDData[0];
                 u32 PhyRowIdx = (nandFlashCMDData[1] | (nandFlashCMDData[2] << 16));
                 u32 destRowIdx = (nandFlashCMDData[4] | (nandFlashCMDData[5] << 16));
-                u16 OpCode_RW_AdrCycle = nandFlashCMDData[3];
                 u32 act = nandFlashCMDData[4] | (nandFlashCMDData[5] << 16);
 
                 // printf("nand>>");
@@ -1024,22 +1105,44 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                         }
                         else
                         {
-                            static u32 nand_sec_fb_log;
-                            u32 fs = 0u, ns = 1u;
-                            if (SectorInPage > 0u && SectorInPage <= 0x600u && (SectorInPage % 512u) == 0u)
-                                fs = SectorInPage / 512u;
-                            if (nandParamSect >= 2u && nandParamSect <= 4u && fs + nandParamSect <= 4u)
-                                ns = nandParamSect;
-                            else if ((nandParamSect & 0xFFu) >= 2u && (nandParamSect & 0xFFu) <= 4u &&
-                                     fs + (nandParamSect & 0xFFu) <= 4u)
-                                ns = nandParamSect & 0xFFu;
-                            if (nand_sec_fb_log < 24u)
+                            u32 firstSector = 0u;
+                            u32 sectorCount = 0u;
+                            if (nand_nc_resolve_sector_window(nandParamSect, SectorInPage, &firstSector, &sectorCount))
                             {
-                                nand_sec_fb_log++;
-                                printf("[nand] fallback cmd20 act88988001 param=0x%x SectorInPage=0x%x phy=%u -> fs=%u ns=%u\n",
-                                       nandParamSect, SectorInPage, PhyRowIdx, fs, ns);
+                                nand_nc_read_page_sectors_contig(p, nandDmaBuffPtr, firstSector, sectorCount);
                             }
-                            nand_nc_read_page_sectors_contig(p, nandDmaBuffPtr, fs, ns);
+                            else
+                            {
+                                static u32 nand_sec_fb_log;
+                                if (nand_sec_fb_log < 24u)
+                                {
+                                    nand_sec_fb_log++;
+                                    printf("[nand] unresolved cmd20 read act88988001 param=0x%x SectorInPage=0x%x phy=%u\n",
+                                           nandParamSect, SectorInPage, PhyRowIdx);
+                                }
+                            }
+                        }
+                    }
+                    else if (act == 0xd800690)
+                    {
+                        nandPage2048 *p = ((nandPage2048 *)NandFlashCard) + PhyRowIdx;
+                        {
+                            u32 firstSector = 0u;
+                            u32 sectorCount = 0u;
+                            if (nand_nc_resolve_sector_window(nandParamSect, SectorInPage, &firstSector, &sectorCount))
+                            {
+                                nand_nc_write_page_sectors_contig(p, nandDmaBuffPtr, firstSector, sectorCount);
+                            }
+                            else
+                            {
+                                static u32 nand_sec_wr_warn;
+                                if (nand_sec_wr_warn < 24u)
+                                {
+                                    nand_sec_wr_warn++;
+                                    printf("[nand] unresolved cmd20 write act=0x%x param=0x%x SectorInPage=0x%x phy=%u\n",
+                                           act, nandParamSect, SectorInPage, PhyRowIdx);
+                                }
+                            }
                         }
                     }
                     else if (act == 0)

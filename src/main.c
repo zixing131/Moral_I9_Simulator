@@ -146,8 +146,8 @@ FILE *SD_File_Handle;
 /** 本次运行打开 SD 镜像时的文件字节数；写入不得超出，否则 Win 上 fwrite 会把文件拉长到数 GB */
 static unsigned long long g_sd_img_max_bytes;
 pthread_mutex_t mutex; // 线程锁
-u32 lastFlashTime;
-u32 lastTaskTime;
+uint64_t lastFlashTime;
+uint64_t lastTaskTime;
 
 u32 lastSaveAdr = 0;
 u32 lastSaveAdr2 = 0;
@@ -376,9 +376,9 @@ void mouseEvent(int type, int x, int y)
 
     if (type == MR_MOUSE_MOVE)
     {
-        static clock_t last_move_enqueue = 0;
-        clock_t now = clock();
-        clock_t min_iv = (clock_t)(CLOCKS_PER_SEC / 30);
+        static uint64_t last_move_enqueue = 0;
+        uint64_t now = moral_get_ticks_ms();
+        uint64_t min_iv = 1000 / 30;
         if (min_iv < 1)
             min_iv = 1;
         if (last_move_enqueue != 0 && (now - last_move_enqueue) < min_iv)
@@ -1282,7 +1282,7 @@ void MainUpdateTask()
 {
     while (1)
     {
-        currentTime = clock();
+        currentTime = moral_get_ticks_ms();
 
 #ifdef GDB_SERVER_SUPPORT
         if (gdbTarget.running == 0)
@@ -1523,9 +1523,9 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     if (((u32)address & ~1u) == 0x31b9c)
     {
         static u32 cached_rtc = 0;
-        static clock_t last_rtc_time = 0;
-        clock_t now = clock();
-        if (cached_rtc == 0 || (now - last_rtc_time) >= CLOCKS_PER_SEC)
+        static uint64_t last_rtc_time = 0;
+        uint64_t now = moral_get_ticks_ms();
+        if (cached_rtc == 0 || (now - last_rtc_time) >= 1000)
         {
             last_rtc_time = now;
             cached_rtc = moral_fw_rtc_seconds_since_2000();

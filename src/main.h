@@ -12,6 +12,11 @@
 #include "config.h"
 #include "keypad.h"
 
+static inline uint64_t moral_get_ticks_ms(void)
+{
+    return (uint64_t)SDL_GetTicks();
+}
+
 /**
  * 按 Surface 实际 BytesPerPixel 写像素（勿假定 32 位 + x*4，否则会整屏竖条/花屏）。
  * c 须为 SDL_MapRGB(s->format, ...) 对该 surface 编码后的值。
@@ -134,7 +139,7 @@ int irq_nested_count;
 u32 irq_stack_ptr;
 u32 debugType;
 
-clock_t currentTime = 0;
+uint64_t currentTime = 0;
 long frameTicks = 0;
 
 int regs[] = {UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3, UC_ARM_REG_R4, UC_ARM_REG_R5, UC_ARM_REG_R6, UC_ARM_REG_R7, UC_ARM_REG_R8,
@@ -188,7 +193,7 @@ u8 Lcd_Need_Update = 0;
 /** 由 0x7400313C 首次成功刷屏后置 1；此前禁止周期性显存拉取，避免开机动画/未就绪缓冲花屏 */
 u8 De_PeriodicRefreshAllowed;
 /** DE trigger 触发时记录时间，周期性刷新在近期有 DE 活动时跳过，避免覆盖新渲染的内容 */
-clock_t De_LastTriggerTime;
+uint64_t De_LastTriggerTime;
 
 u32 DE_Layer0_Ptr;
 u32 DE_Layer0_W;

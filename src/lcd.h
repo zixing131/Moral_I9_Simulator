@@ -42,7 +42,7 @@ typedef struct _lcdRegionOfInterest
     u32 data_addr_type;
 } lcdRegionOfInterest;
 
-clock_t render_time;
+uint64_t render_time;
 u32 lcdUpdateFlag = 0;
 bool lcdIrqFlag = false;
 bool needUpdateLCD;

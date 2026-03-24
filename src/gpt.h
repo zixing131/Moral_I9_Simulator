@@ -18,8 +18,8 @@
 #define GPT2_PRESCALER (GPT_BASE + 0x18)
 
 
-clock_t last_gpt1_interrupt_time;
-clock_t last_gpt2_interrupt_time;
+uint64_t last_gpt1_interrupt_time;
+uint64_t last_gpt2_interrupt_time;
 bool gpt1Enable;
 bool gpt2Enable;
 bool gpt1Circle;

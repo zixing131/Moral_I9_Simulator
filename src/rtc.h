@@ -10,7 +10,7 @@
 #define RTC_MONTH_REG 0x810b0028
 #define RTC_YEAR_REG 0x810b002C
 
-clock_t last_rtc_interrupt_time;
+uint64_t last_rtc_interrupt_time;
 
 void RtcTaskMain();
 void handleRtcVmEvent(vm_event *vmEvent, uint64_t address);

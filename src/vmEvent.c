@@ -27,12 +27,64 @@ vm_event VmEventHandleList[MAX_VM_EVENT_COUNT];
 vm_event VmEventHandleWaitList[MAX_VM_EVENT_WAIT_COUNT];
 vm_event currentEvent;
 u32 VmEventCount = 0;
+static u32 VmEventHead = 0;
 bool VmEventMutex;
 vm_event *vmEvent;
+
+static inline u32 vm_event_queue_index(u32 offset)
+{
+    return (VmEventHead + offset) % MAX_VM_EVENT_COUNT;
+}
+
+static inline void vm_event_queue_push_back(vm_event evt)
+{
+    VmEventHandleList[vm_event_queue_index(VmEventCount)] = evt;
+    VmEventCount++;
+}
+
+static u8 vm_event_queue_contains(u32 event)
+{
+    u32 i;
+    for (i = 0; i < VmEventCount; i++)
+    {
+        if (VmEventHandleList[vm_event_queue_index(i)].event == event)
+            return 1;
+    }
+    return 0;
+}
+
+static u8 vm_event_queue_remove_first(u32 event, vm_event *evt)
+{
+    u32 i;
+    for (i = 0; i < VmEventCount; i++)
+    {
+        u32 idx = vm_event_queue_index(i);
+        if (VmEventHandleList[idx].event == event)
+        {
+            if (evt != NULL)
+                *evt = VmEventHandleList[idx];
+
+            while (i + 1 < VmEventCount)
+            {
+                u32 next_idx = vm_event_queue_index(i + 1);
+                VmEventHandleList[idx] = VmEventHandleList[next_idx];
+                idx = next_idx;
+                i++;
+            }
+
+            VmEventCount--;
+            if (VmEventCount == 0)
+                VmEventHead = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
 
 void InitVmEvent()
 {
     firstEvent = &VmEventHandleList[0];
+    VmEventHead = 0;
     VmEventCount = 0;
     VmEventWaitCount = 0;
 }
@@ -44,6 +96,7 @@ int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
     {
         if (vmIsLock == 0)
         {
+            int enqueued = 0;
             vmIsLock = 1;
             for (i = 0; i < VmEventWaitCount; i++)
             {
@@ -51,16 +104,34 @@ int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
                     break;
                 if (VmEventHandleWaitList[i].event == VM_EVENT_TOUCH_SCREEN_IRQ)
                     touch_irq_pending = 1;
-                VmEventHandleList[VmEventCount++] = VmEventHandleWaitList[i];
+                vm_event_queue_push_back(VmEventHandleWaitList[i]);
             }
-            VmEventWaitCount = 0;
-            vm_event *evt = &VmEventHandleList[VmEventCount++];
-            evt->event = event;
-            evt->r0 = r0;
-            evt->r1 = r1;
-            if (event == VM_EVENT_TOUCH_SCREEN_IRQ)
-                touch_irq_pending = 1;
+            if (i < VmEventWaitCount)
+            {
+                u32 remain = VmEventWaitCount - i;
+                u32 j;
+                for (j = 0; j < remain; j++)
+                    VmEventHandleWaitList[j] = VmEventHandleWaitList[i + j];
+                VmEventWaitCount = remain;
+            }
+            else
+            {
+                VmEventWaitCount = 0;
+            }
+
+            if (VmEventCount < MAX_VM_EVENT_COUNT)
+            {
+                vm_event evt;
+                evt.event = event;
+                evt.r0 = r0;
+                evt.r1 = r1;
+                vm_event_queue_push_back(evt);
+                enqueued = 1;
+                if (event == VM_EVENT_TOUCH_SCREEN_IRQ)
+                    touch_irq_pending = 1;
+            }
             vmIsLock = 0;
+            return enqueued;
         }
         else
         {
@@ -92,26 +163,18 @@ int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
 inline vm_event *DequeueVMEvent()
 {
     vm_event *evt;
-    vm_event *ta;
-    vm_event *tb;
-    u32 i;
     if (VmEventCount > 0 && vmIsLock == 0)
     {
         vmIsLock = 1;
-        ta = &VmEventHandleList[0];
+        vm_event *ta = &VmEventHandleList[VmEventHead];
         currentEvent.event = ta->event;
         currentEvent.r0 = ta->r0;
         currentEvent.r1 = ta->r1;
         evt = &currentEvent;
         --VmEventCount;
-        for (i = 0; i < VmEventCount; i++)
-        {
-            ta = (&VmEventHandleList[i]);
-            tb = ta + 1;
-            ta->event = tb->event;
-            ta->r0 = tb->r0;
-            ta->r1 = tb->r1;
-        }
+        VmEventHead = (VmEventHead + 1) % MAX_VM_EVENT_COUNT;
+        if (VmEventCount == 0)
+            VmEventHead = 0;
         vmIsLock = 0;
     }
     else
@@ -158,28 +221,9 @@ inline void handleVmEvent_EMU(uint64_t address)
         else
         {
             touch_irq_pending = 0;
-            u32 i;
-            for (i = 0; i < VmEventCount; i++)
-            {
-                if (VmEventHandleList[i].event == VM_EVENT_TOUCH_SCREEN_IRQ)
-                {
-                    tevt = VmEventHandleList[i];
-                    u32 j;
-                    VmEventCount--;
-                    for (j = i; j < VmEventCount; j++)
-                        VmEventHandleList[j] = VmEventHandleList[j + 1];
-                    have_evt = 1;
-                    for (j = i; j < VmEventCount; j++)
-                    {
-                        if (VmEventHandleList[j].event == VM_EVENT_TOUCH_SCREEN_IRQ)
-                        {
-                            touch_irq_pending = 1;
-                            break;
-                        }
-                    }
-                    break;
-                }
-            }
+            have_evt = vm_event_queue_remove_first(VM_EVENT_TOUCH_SCREEN_IRQ, &tevt);
+            if (have_evt)
+                touch_irq_pending = vm_event_queue_contains(VM_EVENT_TOUCH_SCREEN_IRQ);
             (void)have_evt;
         }
 

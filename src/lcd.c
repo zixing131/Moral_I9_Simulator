@@ -70,13 +70,13 @@ void lcdTaskMain()
     }
 
 #if MORAL_LCD_PERIODIC_REFRESH_MS > 0
-    static clock_t last_de_poll = 0;
-    clock_t threshold = (clock_t)(MORAL_LCD_PERIODIC_REFRESH_MS * CLOCKS_PER_SEC / 1000);
+    static uint64_t last_de_poll = 0;
+    uint64_t threshold = (uint64_t)MORAL_LCD_PERIODIC_REFRESH_MS;
     if (threshold < 1)
         threshold = 1;
     if (last_de_poll == 0)
         last_de_poll = currentTime;
-    if ((clock_t)(currentTime - last_de_poll) >= threshold)
+    if ((currentTime - last_de_poll) >= threshold)
     {
         last_de_poll = currentTime;
         de_emulator_periodic_refresh();
