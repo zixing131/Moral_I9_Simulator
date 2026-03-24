@@ -438,7 +438,11 @@ void de_emulator_flush_pending(void)
         min_interval = 1;
     if (de_deferred_last_draw != 0 &&
         (now - de_deferred_last_draw) < min_interval)
+    {
+        
+        de_deferred_pending = 0;
         return;
+    }
 
     srcBuf = de_deferred_src_buf;
     pitch = de_deferred_pitch;
