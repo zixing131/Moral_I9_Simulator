@@ -554,6 +554,11 @@ static FILE *open_sd_image_with_fallback(const char **opened_path)
                 fp = fopen(resolved_path, "rb");
             if (fp != NULL)
             {
+                if (!sd_image_candidate_is_usable(fp, resolved_path))
+                {
+                    fclose(fp);
+                    continue;
+                }
                 if (opened_path != NULL)
                     *opened_path = resolved_path;
                 SDL_free(base_path);
@@ -568,6 +573,11 @@ static FILE *open_sd_image_with_fallback(const char **opened_path)
         FILE *fp = fopen(cwd_candidates[i], "r+b");
         if (fp != NULL)
         {
+            if (!sd_image_candidate_is_usable(fp, cwd_candidates[i]))
+            {
+                fclose(fp);
+                continue;
+            }
             if (opened_path != NULL)
                 *opened_path = cwd_candidates[i];
             return fp;
@@ -579,6 +589,11 @@ static FILE *open_sd_image_with_fallback(const char **opened_path)
         FILE *fp = fopen(cwd_candidates[i], "rb");
         if (fp != NULL)
         {
+            if (!sd_image_candidate_is_usable(fp, cwd_candidates[i]))
+            {
+                fclose(fp);
+                continue;
+            }
             if (opened_path != NULL)
                 *opened_path = cwd_candidates[i];
             return fp;
@@ -707,6 +722,116 @@ static int sd_img_get_file_size(FILE *fp, unsigned long long *out_sz)
     *out_sz = (unsigned long long)sz;
     return 0;
 #endif
+}
+
+static int sd_is_valid_sector_size(u32 bps)
+{
+    return bps == 512u || bps == 1024u || bps == 2048u || bps == 4096u;
+}
+
+static int sd_is_valid_cluster_size(u32 spc)
+{
+    return spc != 0u && (spc & (spc - 1u)) == 0u;
+}
+
+static int sd_boot_sector_is_sane(const u8 *sec, unsigned long long file_bytes)
+{
+    u32 bps;
+    u32 spc;
+    u32 reserved;
+    u32 fats;
+    u32 ts16;
+    u32 ts32;
+    unsigned long long vol_sec;
+    unsigned long long vol_bytes;
+
+    if (sec[0x1FE] != 0x55 || sec[0x1FF] != 0xAA)
+        return 0;
+
+    bps = sd_ld16_img(sec + 0x0B);
+    spc = sec[0x0D];
+    reserved = sd_ld16_img(sec + 0x0E);
+    fats = sec[0x10];
+    ts16 = sd_ld16_img(sec + 0x13);
+    ts32 = sd_ld32_img(sec + 0x20);
+
+    if (!sd_is_valid_sector_size(bps))
+        return 0;
+    if (!sd_is_valid_cluster_size(spc))
+        return 0;
+    if (reserved == 0u)
+        return 0;
+    if (fats == 0u || fats > 4u)
+        return 0;
+
+    vol_sec = (ts16 != 0u) ? (unsigned long long)ts16 : (unsigned long long)ts32;
+    if (vol_sec == 0u)
+        return 0;
+
+    vol_bytes = vol_sec * (unsigned long long)bps;
+    if (vol_bytes > file_bytes)
+        return 0;
+
+    return 1;
+}
+
+static int sd_image_candidate_is_usable(FILE *fp, const char *path)
+{
+#if defined(_WIN32)
+    __int64 save = _ftelli64(fp);
+#else
+    long save = ftell(fp);
+#endif
+    unsigned long long file_bytes = 0;
+    u8 s0[512];
+
+    if (save < 0)
+        return 1;
+    if (sd_img_get_file_size(fp, &file_bytes) != 0 || file_bytes < 512ULL)
+        return 1;
+    if (sd_img_fseek_set(fp, 0ULL) != 0)
+        goto restore_and_accept;
+    if (fread(s0, 1, sizeof(s0), fp) != sizeof(s0))
+        goto restore_and_accept;
+
+    if (sd_boot_sector_is_sane(s0, file_bytes))
+        goto restore_and_accept;
+
+    if (s0[0x1FE] == 0x55 && s0[0x1FF] == 0xAA)
+    {
+        unsigned long long nsec = file_bytes / 512ULL;
+        u32 lba = sd_ld32_img(s0 + 0x1C6);
+        u32 cnt = sd_ld32_img(s0 + 0x1CA);
+        if (cnt != 0u && (unsigned long long)lba < nsec &&
+            (unsigned long long)lba + (unsigned long long)cnt <= nsec)
+        {
+            u8 vbr[512];
+            if (sd_img_fseek_set(fp, (unsigned long long)lba * 512ULL) == 0 &&
+                fread(vbr, 1, sizeof(vbr), fp) == sizeof(vbr) &&
+                sd_boot_sector_is_sane(vbr, file_bytes))
+                goto restore_and_accept;
+
+            printf("[SD] 跳过候选镜像: %s\n", path);
+            printf("[SD]     原因: 分区表存在，但引导扇区/BPB 几何非法或超出镜像长度\n");
+            goto restore_and_reject;
+        }
+    }
+
+restore_and_accept:
+#if defined(_WIN32)
+    (void)_fseeki64(fp, save, SEEK_SET);
+#else
+    (void)fseek(fp, save, SEEK_SET);
+#endif
+    return 1;
+
+restore_and_reject:
+#if defined(_WIN32)
+    (void)_fseeki64(fp, save, SEEK_SET);
+#else
+    (void)fseek(fp, save, SEEK_SET);
+#endif
+    return 0;
 }
 
 /*
