@@ -54,6 +54,11 @@
 #define MORAL_LOG_HOT_PATH 0
 #endif
 
+/* KER_VTRACE / ker_trace 代码钩子：默认关闭，避免固件刷屏时同步控制台 I/O 拖垮模拟 */
+#ifndef MORAL_LOG_KERNEL_TRACE
+#define MORAL_LOG_KERNEL_TRACE 0
+#endif
+
 #ifndef MORAL_LOG_SD_IO
 #define MORAL_LOG_SD_IO 0
 #endif
