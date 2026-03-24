@@ -84,6 +84,7 @@ void lcdTaskMain()
         mtk_touch_regs_sync();
     }
 
+    de_lcd_apply_pending_host_blit();
     de_emulator_flush_pending();
 
 #if MORAL_LCD_PERIODIC_REFRESH_MS > 0

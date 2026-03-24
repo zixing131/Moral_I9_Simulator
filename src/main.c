@@ -523,6 +523,7 @@ void RunArmProgram(void *startAddr)
             moral_emu_on_stop(p);
             break;
         }
+        de_emulator_service_guest_fb_pull();
         if (moral_vm_has_pending_events())
         {
             handleVmEvent_EMU((uint64_t)pc);

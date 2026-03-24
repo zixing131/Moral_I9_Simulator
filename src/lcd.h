@@ -9,6 +9,12 @@
 /** 从模拟器 DE/LCD 缓冲区读取整屏并写入 SDL（供 lcdTaskMain 定时调用） */
 void de_emulator_periodic_refresh(void);
 void de_emulator_flush_pending(void);
+/** 主线程：将模拟线程已拉取到 Lcd_Cache_Buffer 的帧画到 SDL surface（须在 flush 之前调用以消费上一帧） */
+void de_lcd_apply_pending_host_blit(void);
+#if MORAL_EMU_DEDICATED_THREAD
+/** 模拟线程：在 uc_emu_start 返回后执行 Guest 显存 uc_mem_read，避免与 CPU 写屏并发撕裂 */
+void de_emulator_service_guest_fb_pull(void);
+#endif
 
 
 typedef struct _lcdLayer

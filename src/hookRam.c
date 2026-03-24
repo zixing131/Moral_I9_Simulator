@@ -337,6 +337,7 @@ static int de_read_fb(u32 srcAddr, u32 guestPitch, u16 w, u16 h)
 
 static u32 de_periodic_call_cnt = 0;
 
+#if !MORAL_EMU_DEDICATED_THREAD
 static int de_read_fb_to(u8 *dstBuf, u32 dstBufSize, u32 srcAddr, u32 guestPitch, u16 w, u16 h)
 {
     u32 rowBytes = (u32)w * DE_BPP;
@@ -372,6 +373,7 @@ static void de_blit_from(u8 *srcCache, u16 dstX, u16 dstY, u16 w, u16 h, u32 cac
         return;
     de_blit_rgb565_to_surface(sfc, srcCache, dstX, dstY, w, h, cachePitch);
 }
+#endif /* !MORAL_EMU_DEDICATED_THREAD */
 
 static u8 de_deferred_pending = 0;
 static u32 de_deferred_src_buf = 0;
@@ -380,6 +382,19 @@ static u16 de_deferred_w = 0;
 static u16 de_deferred_h = 0;
 static uint64_t de_deferred_last_draw = 0;
 static uint64_t lcd_irq_last_enqueue = 0;
+
+/* 主线程只置位 + uc_emu_stop；模拟线程停住 CPU 后再 uc_mem_read，避免与 Guest 写帧缓冲撕裂 */
+#if MORAL_EMU_DEDICATED_THREAD
+volatile int de_guest_fb_pull_requested;
+volatile int de_periodic_fb_pull_requested;
+#endif
+
+static u8 s_lcd_host_blit_pending;
+static u16 s_lcd_host_blit_dstX;
+static u16 s_lcd_host_blit_dstY;
+static u16 s_lcd_host_blit_w;
+static u16 s_lcd_host_blit_h;
+static u32 s_lcd_host_blit_pitch;
 
 static void lcd_irq_enqueue_throttled(void)
 {
@@ -432,7 +447,9 @@ void de_emulator_flush_pending(void)
     }
 #endif
 
+#if !MORAL_EMU_DEDICATED_THREAD
     now = moral_get_ticks_ms();
+#endif
 
     srcBuf = de_deferred_src_buf;
     pitch = de_deferred_pitch;
@@ -456,6 +473,12 @@ void de_emulator_flush_pending(void)
     if (pitch == 0u)
         pitch = (u32)w * DE_BPP;
 
+#if MORAL_EMU_DEDICATED_THREAD
+    de_guest_fb_pull_requested = 1;
+    if (MTK != NULL)
+        uc_emu_stop(MTK);
+    return;
+#else
     if (de_read_fb(srcBuf, pitch, w, h) != 0)
     {
         de_deferred_pending = 0;
@@ -494,6 +517,7 @@ void de_emulator_flush_pending(void)
     de_deferred_last_draw = now;
     Lcd_Need_Update = 1;
     Perf_LcdRefreshCount++;
+#endif
 }
 
 void de_emulator_periodic_refresh(void)
@@ -501,40 +525,195 @@ void de_emulator_periodic_refresh(void)
     if (!De_PeriodicRefreshAllowed)
         return;
 
-    uint64_t now = moral_get_ticks_ms();
-    uint64_t idle_threshold = 100;
-    if (De_LastTriggerTime != 0 && (now - De_LastTriggerTime) < idle_threshold)
-        return;
-
-    u32 srcBuf = Lcd_FullScreen_Ptr;
-    if (srcBuf < 0x1000u || srcBuf >= 0x8000000u)
-        srcBuf = Lcd_Buffer_Ptr;
-    if (srcBuf < 0x1000u || srcBuf >= 0x8000000u)
-        return;
-
+#if MORAL_EMU_DEDICATED_THREAD
+    de_periodic_fb_pull_requested = 1;
+    if (MTK != NULL)
+        uc_emu_stop(MTK);
+#else
     {
-        u8 probe[8];
-        if (uc_mem_read(MTK, srcBuf, probe, 8) == UC_ERR_OK)
+        uint64_t now = moral_get_ticks_ms();
+        uint64_t idle_threshold = 100;
+        if (De_LastTriggerTime != 0 && (now - De_LastTriggerTime) < idle_threshold)
+            return;
+
+        u32 srcBuf = Lcd_FullScreen_Ptr;
+        if (srcBuf < 0x1000u || srcBuf >= 0x8000000u)
+            srcBuf = Lcd_Buffer_Ptr;
+        if (srcBuf < 0x1000u || srcBuf >= 0x8000000u)
+            return;
+
         {
-            u32 w1 = *(u32 *)(probe + 4);
-            if (w1 >= 0xD0000u && w1 < 0x2000000u)
-                return;
+            u8 probe[8];
+            if (uc_mem_read(MTK, srcBuf, probe, 8) == UC_ERR_OK)
+            {
+                u32 w1 = *(u32 *)(probe + 4);
+                if (w1 >= 0xD0000u && w1 < 0x2000000u)
+                    return;
+            }
+        }
+
+        u32 pitch = DE_PANEL_W * DE_BPP;
+
+        if (de_read_fb_to(Lcd_Periodic_Buffer, sizeof(Lcd_Periodic_Buffer),
+                          srcBuf, pitch, DE_PANEL_W, DE_PANEL_H) != 0)
+            return;
+
+        de_blit_from(Lcd_Periodic_Buffer, 0, 0, DE_PANEL_W, DE_PANEL_H, DE_PANEL_W * DE_BPP);
+        Lcd_Need_Update = 1;
+        Perf_LcdRefreshCount++;
+        de_periodic_call_cnt++;
+        if (MORAL_LOG_HOT_PATH && (de_periodic_call_cnt <= 5 || (de_periodic_call_cnt % 200) == 0))
+            printf("[LCD-REFRESH] periodic #%u buf=0x%x\n", de_periodic_call_cnt, srcBuf);
+    }
+#endif
+}
+
+void de_lcd_apply_pending_host_blit(void)
+{
+    if (!s_lcd_host_blit_pending)
+        return;
+    s_lcd_host_blit_pending = 0;
+    de_blit_to_sdl(s_lcd_host_blit_dstX, s_lcd_host_blit_dstY, s_lcd_host_blit_w, s_lcd_host_blit_h,
+                   s_lcd_host_blit_pitch);
+    Lcd_Need_Update = 1;
+}
+
+#if MORAL_EMU_DEDICATED_THREAD
+void de_emulator_service_guest_fb_pull(void)
+{
+    u32 srcBuf;
+    u32 pitch;
+    u16 w, h;
+    uint64_t now;
+    u16 dstX, dstY;
+
+    if (de_guest_fb_pull_requested)
+    {
+        de_guest_fb_pull_requested = 0;
+        if (de_deferred_pending)
+        {
+            now = moral_get_ticks_ms();
+            srcBuf = de_deferred_src_buf;
+            pitch = de_deferred_pitch;
+            w = de_deferred_w;
+            h = de_deferred_h;
+
+            if (Lcd_FullScreen_Ptr >= 0x1000u && Lcd_FullScreen_Ptr < 0x8000000u &&
+                (w < (DE_PANEL_W - 20u) || h < (DE_PANEL_H - 80u)))
+            {
+                srcBuf = Lcd_FullScreen_Ptr;
+                pitch = DE_PANEL_W * DE_BPP;
+                w = (u16)DE_PANEL_W;
+                h = (u16)DE_PANEL_H;
+            }
+
+            if (srcBuf < 0x1000u || srcBuf >= 0x8000000u || w == 0 || h == 0)
+            {
+                de_deferred_pending = 0;
+            }
+            else
+            {
+                if (pitch == 0u)
+                    pitch = (u32)w * DE_BPP;
+
+                if (de_read_fb(srcBuf, pitch, w, h) != 0)
+                {
+                    de_deferred_pending = 0;
+                }
+                else
+                {
+                    if (w >= DE_PANEL_W - 20u && h >= DE_PANEL_H - 80u)
+                    {
+                        u32 rowBytes = (u32)w * DE_BPP;
+                        u32 step = (rowBytes < 16u) ? 2u : 16u;
+                        u32 cnt = 0, white = 0;
+                        for (u32 off = 0; off < (u32)h * rowBytes && cnt < 64u; off += step)
+                        {
+                            cnt++;
+                            if (off + 1u < (u32)h * rowBytes &&
+                                Lcd_Cache_Buffer[off] == 0xFFu &&
+                                Lcd_Cache_Buffer[off + 1u] == 0xFFu)
+                                white++;
+                        }
+                        if (cnt > 0 && white * 10u >= cnt * 9u)
+                        {
+                            de_deferred_pending = 0;
+                        }
+                        else
+                        {
+                            goto de_stage_deferred_blit;
+                        }
+                    }
+                    else
+                    {
+                    de_stage_deferred_blit:
+                        if (w == DE_PANEL_W && h == DE_PANEL_H)
+                        {
+                            s_lcd_host_blit_dstX = 0;
+                            s_lcd_host_blit_dstY = 0;
+                        }
+                        else
+                        {
+                            de_resolve_blit_dest(srcBuf, &dstX, &dstY);
+                            s_lcd_host_blit_dstX = dstX;
+                            s_lcd_host_blit_dstY = dstY;
+                        }
+                        s_lcd_host_blit_w = w;
+                        s_lcd_host_blit_h = h;
+                        s_lcd_host_blit_pitch = (u32)w * DE_BPP;
+                        s_lcd_host_blit_pending = 1;
+                        de_deferred_last_draw = now;
+                        Perf_LcdRefreshCount++;
+                        de_deferred_pending = 0;
+                    }
+                }
+            }
         }
     }
 
-    u32 pitch = DE_PANEL_W * DE_BPP;
+    if (de_periodic_fb_pull_requested)
+    {
+        de_periodic_fb_pull_requested = 0;
+        if (!De_PeriodicRefreshAllowed)
+            return;
 
-    if (de_read_fb_to(Lcd_Periodic_Buffer, sizeof(Lcd_Periodic_Buffer),
-                      srcBuf, pitch, DE_PANEL_W, DE_PANEL_H) != 0)
-        return;
+        now = moral_get_ticks_ms();
+        if (De_LastTriggerTime != 0 && (now - De_LastTriggerTime) < 100)
+            return;
 
-    de_blit_from(Lcd_Periodic_Buffer, 0, 0, DE_PANEL_W, DE_PANEL_H, DE_PANEL_W * DE_BPP);
-    Lcd_Need_Update = 1;
-    Perf_LcdRefreshCount++;
-    de_periodic_call_cnt++;
-    if (MORAL_LOG_HOT_PATH && (de_periodic_call_cnt <= 5 || (de_periodic_call_cnt % 200) == 0))
-        printf("[LCD-REFRESH] periodic #%u buf=0x%x\n", de_periodic_call_cnt, srcBuf);
+        srcBuf = Lcd_FullScreen_Ptr;
+        if (srcBuf < 0x1000u || srcBuf >= 0x8000000u)
+            srcBuf = Lcd_Buffer_Ptr;
+        if (srcBuf < 0x1000u || srcBuf >= 0x8000000u)
+            return;
+
+        {
+            u8 probe[8];
+            if (uc_mem_read(MTK, srcBuf, probe, 8) == UC_ERR_OK)
+            {
+                u32 w1 = *(u32 *)(probe + 4);
+                if (w1 >= 0xD0000u && w1 < 0x2000000u)
+                    return;
+            }
+        }
+
+        pitch = DE_PANEL_W * DE_BPP;
+        if (de_read_fb(srcBuf, pitch, DE_PANEL_W, DE_PANEL_H) != 0)
+            return;
+
+        s_lcd_host_blit_dstX = 0;
+        s_lcd_host_blit_dstY = 0;
+        s_lcd_host_blit_w = (u16)DE_PANEL_W;
+        s_lcd_host_blit_h = (u16)DE_PANEL_H;
+        s_lcd_host_blit_pitch = pitch;
+        s_lcd_host_blit_pending = 1;
+        Perf_LcdRefreshCount++;
+        de_periodic_call_cnt++;
+        if (MORAL_LOG_HOT_PATH && (de_periodic_call_cnt <= 5 || (de_periodic_call_cnt % 200) == 0))
+            printf("[LCD-REFRESH] periodic #%u buf=0x%x\n", de_periodic_call_cnt, srcBuf);
+    }
 }
+#endif /* MORAL_EMU_DEDICATED_THREAD */
 
 void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
 {
